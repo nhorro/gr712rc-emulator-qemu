@@ -110,6 +110,34 @@ The following files in the QEMU tree are modified or added relative to the upstr
 | `target/sparc/cpu.c` | `cpu_sparc_set_id` stores CPU ID in `leon3_cpuid` |
 | `target/sparc/translate.c` | `do_rd_leon3_config` reads `leon3_cpuid` for per-CPU `%asr17` |
 
+## Development workflow
+
+`qemu/` is a git submodule pointing to the patched QEMU fork
+([nhorro/qemu-gr712rc-fork](https://github.com/nhorro/qemu-gr712rc-fork), branch `gr712rc`).
+Clone everything with:
+
+```bash
+git clone --recurse-submodules git@github.com:nhorro/qemu-gr712rc.git
+```
+
+When you edit QEMU source files, commit and push **inside** `qemu/` first,
+then update the submodule pointer in the parent repo:
+
+```bash
+# Inside qemu/
+git add <changed files>
+git commit -m "Description of QEMU change"
+git push origin gr712rc
+
+# Back in the parent repo
+git add qemu
+git commit -m "Update QEMU submodule: <same description>"
+git push origin main
+```
+
+See [docs/05-contributing.md](docs/05-contributing.md) for the full workflow including
+toolchain setup, fresh QEMU builds, and rebasing on upstream releases.
+
 ## Developer documentation
 
 See the [`docs/`](docs/) directory for guides aimed at contributors who are
