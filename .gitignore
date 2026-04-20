@@ -1,0 +1,15 @@
+# Claude session notes
+DEVNOTES.md
+
+# Toolchain — binaries and archives are not stored in git.
+# Download RCC 1.3.2 from https://www.gaisler.com/index.php/downloads/compilers
+# and extract into toolchain/rcc-1.3.2-gcc/
+toolchain/rcc-1.3.2-gcc/
+toolchain/bcc2-2.3.1-linux.tar.xz
+toolchain/rcc-1.3.2-linux.txz
+
+# QEMU build artefacts
+qemu/build/
+
+# Application build artefacts
+apps/**/*.exe
