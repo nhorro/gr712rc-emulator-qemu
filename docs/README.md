@@ -7,3 +7,4 @@
 | [03-adding-a-peripheral.md](03-adding-a-peripheral.md) | Step-by-step walkthrough for adding a new GRLIB APB device (OCCAN stub as example), including build system integration, APB PnP registration, IRQ wiring, and timer-driven devices. |
 | [04-debugging.md](04-debugging.md) | GDB remote debugging, QEMU monitor commands, the trace subsystem, quick fprintf instrumentation, and a catalogue of common failure modes with root causes and fixes. |
 | [05-contributing.md](05-contributing.md) | Git workflow for this repo: cloning with submodules, editing QEMU source and committing to the fork, updating the submodule pointer, toolchain setup, and rebasing on upstream QEMU releases. |
+| [06-uart-socket-interface.md](06-uart-socket-interface.md) | Connecting external simulators to APBUARTs 1–4 via TCP socket backends; raw byte-stream protocol; extending the convention to CAN and SpaceWire. |
