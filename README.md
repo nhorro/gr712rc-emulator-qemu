@@ -94,6 +94,27 @@ You can also run either binary directly:
 ./qemu/build/qemu-system-sparc -M gr712rc -nographic -kernel apps/02-dual-core-timer/dual_core_timer.exe
 ```
 
+### 03 — Five UARTs with TCP socket backends
+
+Sends a periodic counter on every APBUART. UART-0 uses the console
+(`printf`); UARTs 1–4 write directly to their APBUART TX register and are
+exposed by QEMU as TCP listeners on ports 5001–5004:
+
+```bash
+cd apps/03-five-uarts
+make run
+```
+
+Connect to any of the side UARTs from another terminal with `nc`:
+
+```bash
+nc localhost 5001
+```
+
+See [`docs/06-uart-socket-interface.md`](docs/06-uart-socket-interface.md)
+for the QEMU `-serial tcp::PORT,server,nowait` flags and the AMBA PnP
+discovery flow that lets RTEMS find UARTs 1–4 without hardcoded addresses.
+
 ### 04 — MkProm self-bootable image
 
 Same dual-core counter as example 02, but the ELF is wrapped by `mkprom2` into
