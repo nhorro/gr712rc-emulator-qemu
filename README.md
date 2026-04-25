@@ -109,6 +109,37 @@ make run
 See [`apps/04-mkprom-boot/README.md`](apps/04-mkprom-boot/README.md) for
 details on the boot flow and `mkprom2` flags.
 
+### 05 — Scriptable AMBA device (Lua + YAML)
+
+Demonstrates the scriptable-device infrastructure: a Lua script implements
+a tiny MMIO peripheral (a register file, an IRQ-pulse trigger), the device
+is wired into the AMBA map by a YAML config, and an RTEMS app exercises
+each behaviour. Requires `liblua5.4-dev` and `libyaml-dev`:
+
+```bash
+sudo apt install -y liblua5.4-dev libyaml-dev
+cd apps/05-scriptable-stub
+make run
+```
+
+Expected output (all checks PASS):
+
+```
+status[0x4]          got=0xcafe0000 want=0xcafe0000 PASS
+scratch r/w          got=0xdeadbeef want=0xdeadbeef PASS
+unmapped[0x8]        got=0x00000000 want=0x00000000 PASS
+irq pending before   got=0x00000000 want=0x00000000 PASS
+irq pending after    got=0x00001000 want=0x00001000 PASS
+irq pending cleared  got=0x00000000 want=0x00000000 PASS
+*** END OF TEST ***
+```
+
+QEMU loads `gr712rc-scriptable.yaml` from the working directory (absent
+file → no scripted devices). The script's `read` / `write` callbacks
+have access to a `sim` table for logging, virtual time, and IRQ control.
+See [`docs/04-debugging.md §7`](docs/04-debugging.md) for the
+`gr712rc-diag` log format that catches accesses to unmodeled peripherals.
+
 ## QEMU patches
 
 The following files in the QEMU tree are modified or added relative to the upstream 8.2.2 tag:
