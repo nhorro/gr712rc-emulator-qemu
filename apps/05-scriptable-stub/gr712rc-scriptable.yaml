@@ -1,0 +1,6 @@
+devices:
+  - name:   grspw0-stub
+    base:   0x80100800
+    size:   0x400
+    script: grspw0.lua
+    irqs:   [12]      # IRQ line(s) the script may raise; 1..15

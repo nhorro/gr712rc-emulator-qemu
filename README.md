@@ -166,6 +166,8 @@ familiar with SPARC / GR712RC development but new to QEMU internals:
 
 ## Notes
 
+- **Debugging unmodeled peripherals**: Run QEMU with `-d guest_errors,unimp` to see `[gr712rc-diag]` log lines for any access to an unmodeled peripheral address. Each line includes the CPU index, PC, address, size, direction, and (for writes) the value. Add `-d int` to also log every SPARC trap entry. See [docs/04-debugging.md §7](docs/04-debugging.md) for details.
+
 - **FPU and SMP**: RTEMS 5 in SMP mode uses synchronous (not lazy) FP context switching. Tasks that call `printf` or any function generating FP instructions must be created with the `RTEMS_FLOATING_POINT` attribute; otherwise a `fp_disabled` trap fires a fatal error at runtime.
 
 - **Cache snooping**: The RTEMS LEON3 SMP BSP checks `CACHE_CTRL_DS` (bit 23 of the cache control register) on startup and aborts if it is not set. `gr712rc_cpu_reset` sets `env->cache_control = CACHE_CTRL_DS` for both CPUs to satisfy this check.
