@@ -18,10 +18,11 @@ The QEMU machine type (`-M gr712rc`) is implemented as a patch on top of QEMU 8.
 qemu-gr712rc/
 ├── apps/
 │   ├── 01-hello-rtems/       Single-core RTEMS hello world
-│   └── 02-dual-core-timer/   Dual-core SMP counter demo
+│   ├── 02-dual-core-timer/   Dual-core SMP counter demo
+│   ├── 03-five-uarts/        Five-UART traffic demo with TCP socket backends
+│   └── 04-mkprom-boot/       Self-bootable PROM image built with mkprom2
 ├── qemu/                     QEMU 8.2.2 source tree (patched)
-└── toolchain/
-    └── rcc-1.3.2-gcc/        sparc-gaisler-rtems5-gcc cross-toolchain
+└── toolchain/                Gaisler tools (RCC, BCC2, mkprom2 — not in git)
 ```
 
 ## Prerequisites
@@ -92,6 +93,21 @@ You can also run either binary directly:
 ```bash
 ./qemu/build/qemu-system-sparc -M gr712rc -nographic -kernel apps/02-dual-core-timer/dual_core_timer.exe
 ```
+
+### 04 — MkProm self-bootable image
+
+Same dual-core counter as example 02, but the ELF is wrapped by `mkprom2` into
+a flat PROM image and booted via `-bios` (no `-kernel`, no QEMU-generated
+trampoline). Requires `mkprom2` available at
+`toolchain/mkprom2-2.0.69/mkprom2/mkprom2` (or pass `MKPROM=/path/to/mkprom2`):
+
+```bash
+cd apps/04-mkprom-boot
+make run
+```
+
+See [`apps/04-mkprom-boot/README.md`](apps/04-mkprom-boot/README.md) for
+details on the boot flow and `mkprom2` flags.
 
 ## QEMU patches
 
