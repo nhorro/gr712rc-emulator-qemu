@@ -276,3 +276,65 @@ make -j$(nproc) qemu-system-sparc
 
 Meson tracks dependencies precisely; only translation units that depend on
 modified files are recompiled.  A typical one-file change takes a few seconds.
+
+---
+
+## 7. QEMU log flags (`-d`) and the `gr712rc-diag` catcher
+
+When a real GR712RC application runs against this incomplete emulator, the
+most common failure modes are (a) accessing an unmodeled peripheral
+register, and (b) hitting a SPARC trap (illegal instruction, alignment,
+unhandled register-window overflow, etc.). The flags below cover both.
+
+### Recommended flag combo
+
+```bash
+./qemu/build/qemu-system-sparc -M gr712rc -nographic \
+    -d guest_errors,unimp,int \
+    -D /tmp/qemu.log \
+    -kernel <app>.exe
+```
+
+| Flag           | What it logs                                                                |
+|----------------|-----------------------------------------------------------------------------|
+| `guest_errors` | `[gr712rc-diag]` lines for unmodeled-peripheral accesses (see below)        |
+| `unimp`        | Same `[gr712rc-diag]` lines plus other "unimplemented" device messages      |
+| `int`          | Every SPARC trap entry (trap number, CPU, PC) — useful for crashes          |
+
+`-D <file>` redirects the log to a file; without it, `-d` output goes to
+stderr and intermixes with the guest's serial output.
+
+### The `gr712rc-diag` catcher
+
+`gr712rc_install_amba_diag()` registers a low-priority `MemoryRegion`
+covering both APB bridges (`0x80000000`–`0x80200000`, 2 MiB). Real and
+scripted devices override it via subregion priority and behave normally;
+anything that falls through gets a tagged log line:
+
+```
+[gr712rc-diag] CPU0 PC=0x4000146c: unmapped write at 0x80000a00 size=4 value=0x12345678
+[gr712rc-diag] CPU0 PC=0x40001474: unmapped read  at 0x80000a00 size=4 -> 0
+```
+
+Reads return 0; writes are no-ops. The goal is *visibility*, not
+faithfulness to GR712RC bus-error semantics — a real chip would raise a
+`data_access_exception` here, but trapping makes the failure point harder
+to find than logging does.
+
+When you see one of these lines while running a real app, the address is
+a peripheral that needs either (a) a real QEMU device model, or (b) a
+Lua-driven stub via the scriptable-device YAML config (see
+[apps/05-scriptable-stub/](../apps/05-scriptable-stub/)).
+
+### Cross-referencing PC with the application
+
+The PC in the diag line is a guest-virtual address. To find the source
+location, use `objdump`:
+
+```bash
+sparc-gaisler-rtems5-objdump -d <app>.exe | grep -B2 '4000146c:'
+```
+
+Or run the app under GDB (see §1) and `break *0x4000146c` to stop at the
+exact instruction that performs the access.
+

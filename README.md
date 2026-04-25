@@ -94,6 +94,27 @@ You can also run either binary directly:
 ./qemu/build/qemu-system-sparc -M gr712rc -nographic -kernel apps/02-dual-core-timer/dual_core_timer.exe
 ```
 
+### 03 — Five UARTs with TCP socket backends
+
+Sends a periodic counter on every APBUART. UART-0 uses the console
+(`printf`); UARTs 1–4 write directly to their APBUART TX register and are
+exposed by QEMU as TCP listeners on ports 5001–5004:
+
+```bash
+cd apps/03-five-uarts
+make run
+```
+
+Connect to any of the side UARTs from another terminal with `nc`:
+
+```bash
+nc localhost 5001
+```
+
+See [`docs/06-uart-socket-interface.md`](docs/06-uart-socket-interface.md)
+for the QEMU `-serial tcp::PORT,server,nowait` flags and the AMBA PnP
+discovery flow that lets RTEMS find UARTs 1–4 without hardcoded addresses.
+
 ### 04 — MkProm self-bootable image
 
 Same dual-core counter as example 02, but the ELF is wrapped by `mkprom2` into
@@ -108,6 +129,37 @@ make run
 
 See [`apps/04-mkprom-boot/README.md`](apps/04-mkprom-boot/README.md) for
 details on the boot flow and `mkprom2` flags.
+
+### 05 — Scriptable AMBA device (Lua + YAML)
+
+Demonstrates the scriptable-device infrastructure: a Lua script implements
+a tiny MMIO peripheral (a register file, an IRQ-pulse trigger), the device
+is wired into the AMBA map by a YAML config, and an RTEMS app exercises
+each behaviour. Requires `liblua5.4-dev` and `libyaml-dev`:
+
+```bash
+sudo apt install -y liblua5.4-dev libyaml-dev
+cd apps/05-scriptable-stub
+make run
+```
+
+Expected output (all checks PASS):
+
+```
+status[0x4]          got=0xcafe0000 want=0xcafe0000 PASS
+scratch r/w          got=0xdeadbeef want=0xdeadbeef PASS
+unmapped[0x8]        got=0x00000000 want=0x00000000 PASS
+irq pending before   got=0x00000000 want=0x00000000 PASS
+irq pending after    got=0x00001000 want=0x00001000 PASS
+irq pending cleared  got=0x00000000 want=0x00000000 PASS
+*** END OF TEST ***
+```
+
+QEMU loads `gr712rc-scriptable.yaml` from the working directory (absent
+file → no scripted devices). The script's `read` / `write` callbacks
+have access to a `sim` table for logging, virtual time, and IRQ control.
+See [`docs/04-debugging.md §7`](docs/04-debugging.md) for the
+`gr712rc-diag` log format that catches accesses to unmodeled peripherals.
 
 ## QEMU patches
 
@@ -165,6 +217,8 @@ familiar with SPARC / GR712RC development but new to QEMU internals:
 - [Debugging guide](docs/04-debugging.md) — GDB, QEMU monitor, tracing, common failures
 
 ## Notes
+
+- **Debugging unmodeled peripherals**: Run QEMU with `-d guest_errors,unimp` to see `[gr712rc-diag]` log lines for any access to an unmodeled peripheral address. Each line includes the CPU index, PC, address, size, direction, and (for writes) the value. Add `-d int` to also log every SPARC trap entry. See [docs/04-debugging.md §7](docs/04-debugging.md) for details.
 
 - **FPU and SMP**: RTEMS 5 in SMP mode uses synchronous (not lazy) FP context switching. Tasks that call `printf` or any function generating FP instructions must be created with the `RTEMS_FLOATING_POINT` attribute; otherwise a `fp_disabled` trap fires a fatal error at runtime.
 
