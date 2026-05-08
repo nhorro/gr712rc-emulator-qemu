@@ -67,6 +67,26 @@ make -j$(nproc)
 
 The emulator binary is at `qemu/build/qemu-system-sparc`.
 
+## Running as a service (Docker + HTTP/WebSocket API)
+
+For demos and UI integration, the emulator is also wrapped in a Python
+adapter service that exposes load / start / pause / resume / reset and
+UART streaming over HTTP + WebSocket. Bring it up with:
+
+```bash
+docker compose up --build
+# → service is listening on http://localhost:8080
+# → Swagger UI at http://localhost:8080/docs
+```
+
+ELFs built locally with the FSW toolchain are uploaded via
+`POST /uploads`, then driven through `POST /session` and
+`POST /session/start`. UART output streams over `WS /ws/uart/{n}`.
+
+See [`docs/07-adapter-api.md`](docs/07-adapter-api.md) for the full
+API contract and [`docs/08-running-the-service.md`](docs/08-running-the-service.md)
+for a worked walkthrough.
+
 ## Building and running the applications
 
 Each app has a `Makefile` with three targets: `all` (build), `run` (build + launch in QEMU), and `clean`.
@@ -278,6 +298,8 @@ familiar with SPARC / GR712RC development but new to QEMU internals:
 - [Code map](docs/02-code-map.md) — where to find things in the source tree
 - [Adding a peripheral](docs/03-adding-a-peripheral.md) — step-by-step walkthrough
 - [Debugging guide](docs/04-debugging.md) — GDB, QEMU monitor, tracing, common failures
+- [Adapter service & API specification](docs/07-adapter-api.md) — v0 contract for the HTTP/WebSocket service
+- [Running the service](docs/08-running-the-service.md) — Docker walkthrough, sample curl/wscat invocations
 
 ## Notes
 
