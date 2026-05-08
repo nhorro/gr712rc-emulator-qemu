@@ -1,0 +1,41 @@
+# Exclude everything that doesn't belong in the QEMU+service image build
+# context. Without this, the 6+ GB toolchain/ tarballs and local qemu/build/
+# artifacts would be uploaded to the Docker daemon on every build.
+
+# Toolchain (RCC/BCC2/mkprom2 archives + extracted trees) — host-only.
+toolchain/
+
+# Pre-built RTEMS apps and intermediate artifacts.
+apps/*/*.exe
+apps/*/*.elf
+apps/*/*.o
+apps/*/probe.log
+
+# Local QEMU build directory (built on host).
+qemu/build/
+
+# Local Python venv used for host-side service development.
+service/.venv/
+service/*.egg-info/
+
+# UI runtime artifacts (uploads dir is created at runtime, never baked in).
+ui/uploads/
+
+# Git internals and editor metadata.
+.git/
+.gitignore
+.gitmodules
+.claude/
+.idea/
+.vscode/
+**/__pycache__/
+**/*.pyc
+
+# Documentation that doesn't need to ship in the runtime image.
+docs/
+README.md
+DEVNOTES.md
+LICENSE
+
+# Anything ending in .md anywhere in the tree.
+**/*.md
