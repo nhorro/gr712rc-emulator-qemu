@@ -18,6 +18,9 @@ qemu/build/
 service/.venv/
 service/*.egg-info/
 
+# UI runtime artifacts (uploads dir is created at runtime, never baked in).
+ui/uploads/
+
 # Git internals and editor metadata.
 .git/
 .gitignore

@@ -21,4 +21,9 @@ services:
     # per-file limit is never the bottleneck.
     tmpfs:
       - /var/uploads:size=64m
+    # Bind-mount ui/ over the image's bundled copy. Lets you edit JSX
+    # and hard-refresh the browser without rebuilding the image. Comment
+    # out for production deployments where the baked-in copy should win.
+    volumes:
+      - ./ui:/opt/ui:ro
     restart: unless-stopped

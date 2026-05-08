@@ -12,7 +12,8 @@ from typing import Optional
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
 
 from .machines import MACHINES
 from .models import (CreateSessionRequest, ErrorResponse, MemoryResponse,
@@ -22,6 +23,10 @@ from .uart import pump as uart_pump
 
 UPLOADS_DIR = Path(os.environ.get("UPLOADS_DIR", "/var/uploads"))
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Optional bundled UI. When the directory exists (it does in the Docker
+# image; not on a bare `pip install` of the service), serve it at /ui/.
+UI_DIR = Path(os.environ.get("UI_DIR", "/opt/ui"))
 
 # Global single-session state. The adapter intentionally serves one
 # session at a time (see spec §1).
@@ -313,3 +318,19 @@ async def ws_events(websocket: WebSocket):
             await websocket.close()
         except Exception:
             pass
+
+
+# ----------------------------------------------------------------------
+# Bundled UI (optional)
+#
+# Mounted last so that all API routes above take precedence. The UI
+# directory ships in the Docker image; on a bare `pip install` of the
+# service the UI is not present and only the API surface is served.
+# ----------------------------------------------------------------------
+
+if UI_DIR.is_dir():
+    @app.get("/", include_in_schema=False)
+    async def root_redirect():
+        return RedirectResponse(url="/ui/")
+
+    app.mount("/ui", StaticFiles(directory=str(UI_DIR), html=True), name="ui")

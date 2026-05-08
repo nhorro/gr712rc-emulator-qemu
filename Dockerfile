@@ -76,7 +76,13 @@ COPY --from=qemu-builder /qemu-install /usr/local
 COPY service/ /opt/service/
 RUN pip install --no-cache-dir /opt/service
 
+# Bundled web UI. Served at /ui/ with a redirect from /. Optional — if
+# you want a headless API-only image, omit this COPY and main.py will
+# skip the static mount.
+COPY ui/ /opt/ui/
+
 ENV UPLOADS_DIR=/var/uploads
+ENV UI_DIR=/opt/ui
 RUN mkdir -p /var/uploads
 WORKDIR /opt/service
 
