@@ -5,6 +5,8 @@ QEMU emulation of two Cobham Gaisler space-grade SoCs, targeting [RTEMS](https:/
 - **`-M gr712rc`** — dual-core LEON3FT
 - **`-M gr740`** — quad-core LEON4 (NGMP)
 
+![Screenshot](./docs/assets/screenshot.png)
+
 Both machine types are implemented as patches on top of QEMU 8.2.2.
 
 `-M gr712rc` includes:
