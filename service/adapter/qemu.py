@@ -169,19 +169,23 @@ class QEMUSession:
             raise QMPError(f"cannot start from state '{self.status}'")
 
         cmd = self._build_command()
+        # stderr inherits the service's stderr so spawn-time errors and
+        # in-flight warnings (`[IRQMP] read unknown ...`, etc.) show up
+        # in `docker compose logs` without us having to drain a pipe.
         self._process = await asyncio.create_subprocess_exec(
-            *cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            *cmd, stdout=subprocess.DEVNULL)
 
         # Wait for the QMP socket to appear (QEMU creates it during init).
         deadline = asyncio.get_running_loop().time() + 5.0
         while not self._qmp_socket.exists():
             if asyncio.get_running_loop().time() > deadline:
-                stderr = (await self._process.stderr.read()).decode(errors="replace")
-                raise QMPError(f"QEMU did not create QMP socket within 5s. "
-                               f"stderr:\n{stderr}")
+                raise QMPError("QEMU did not create QMP socket within 5s. "
+                               "Check `docker compose logs emulator` for "
+                               "QEMU stderr.")
             if self._process.returncode is not None:
-                stderr = (await self._process.stderr.read()).decode(errors="replace")
-                raise QMPError(f"QEMU exited during startup. stderr:\n{stderr}")
+                raise QMPError(f"QEMU exited during startup with code "
+                               f"{self._process.returncode}. Check "
+                               f"`docker compose logs emulator`.")
             await asyncio.sleep(0.05)
 
         self._qmp = QMPClient()
@@ -314,13 +318,25 @@ class QEMUSession:
     # ------------------------------------------------------------------
 
     def _build_command(self) -> list[str]:
+        # Sniff the kernel file: ELF magic ⇒ use -kernel (QEMU writes a
+        # trampoline + jumps to the ELF entry); anything else is treated
+        # as a raw PROM image and loaded via -bios at PROM_BASE. This
+        # mirrors the apps/04-mkprom-boot CLI Makefile which uses -bios.
+        load_flag = "-kernel"
+        try:
+            with open(self.kernel, "rb") as f:
+                if f.read(4) != b"\x7fELF":
+                    load_flag = "-bios"
+        except OSError:
+            pass  # fall back to -kernel; QEMU will surface a clear error
+
         cmd = [
             "qemu-system-sparc",
             "-M", self.machine,
             "-smp", str(self.smp),
             "-m", f"{self.ram_mb}M",
             "-nographic",
-            "-kernel", str(self.kernel),
+            load_flag, str(self.kernel),
             "-S",  # start stopped; we cont() once QMP is up
             "-qmp", f"unix:{self._qmp_socket},server=on,wait=off",
             "-monitor", "null",
@@ -365,7 +381,6 @@ class QEMUSession:
             return  # already handled
         rc = self._process.returncode
         # QEMU exits 0 on RTEMS exit() via SHUTDOWN; non-zero on internal error.
-        # We surface 0 as a clean exit, anything else as fatal.
         if rc == 0:
             self.exit_code = 0
             self.status = "exited"
