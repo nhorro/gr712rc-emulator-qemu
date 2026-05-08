@@ -1,26 +1,43 @@
-# QEMU GR712RC — LEON3FT SMP Emulation
+# QEMU GR712RC / GR740 — LEON3/LEON4 SMP Emulation
 
-QEMU emulation of the **Cobham Gaisler GR712RC** dual-core LEON3FT SoC, targeting [RTEMS](https://www.rtems.org/) 5 applications built with the [RCC 1.3.2](https://www.gaisler.com/index.php/downloads/compilers) (RTEMS Compiler Collection) toolchain.
+QEMU emulation of two Cobham Gaisler space-grade SoCs, targeting [RTEMS](https://www.rtems.org/) 5 applications built with the [RCC 1.3.2](https://www.gaisler.com/index.php/downloads/compilers) (RTEMS Compiler Collection) toolchain:
 
-The QEMU machine type (`-M gr712rc`) is implemented as a patch on top of QEMU 8.2.2. It includes:
+- **`-M gr712rc`** — dual-core LEON3FT
+- **`-M gr740`** — quad-core LEON4 (NGMP)
+
+Both machine types are implemented as patches on top of QEMU 8.2.2.
+
+`-M gr712rc` includes:
 
 - Two LEON3FT cores, CPU 1 halted at reset and released by the IRQMP MPSTATUS register
 - IRQMP interrupt controller with SMP CPU-release support (`cpu-start` GPIO)
 - GPTIMER with 4 timers at 50 MHz
-- APBUART-0 mapped to the QEMU serial port
+- APBUART-0 mapped to the QEMU serial port (UARTs 1–4 available with `-serial tcp::PORT`)
 - FTMCTRL register stub for MkProm compatibility
 - AHB/APB Plug&Play ROM required by the RTEMS BSP auto-discovery
 - Per-CPU `%asr17` returning the correct CPU ID in bits [31:28]
+- Scriptable AMBA devices (Lua + YAML) for prototyping
+
+`-M gr740` includes:
+
+- Four LEON4 cores (modeled as LEON3 — the LEON4 ISA is SPARC V8 + same ASIs); CPUs 1–3 halted at reset and released individually via IRQMP MPSTATUS
+- NGMP memory map: SDRAM at `0x00000000` (via L2C), PROM at `0xC0000000`, L2C registers at `0xF0000000`, single APB bridge at `0xFF900000`, AHB PnP at `0xFFFFF000`
+- IRQMP, GPTIMER (4 timers), APBUART-0 — all PnP-discoverable
+- L2 cache controller register-storage stub at `0xF0000000`
+- Per-CPU `%asr17` for CPU IDs 0–3
 
 ## Repository layout
 
 ```
 qemu-gr712rc/
 ├── apps/
-│   ├── 01-hello-rtems/       Single-core RTEMS hello world
-│   ├── 02-dual-core-timer/   Dual-core SMP counter demo
+│   ├── 01-hello-rtems/       Single-core RTEMS hello world (gr712rc)
+│   ├── 02-dual-core-timer/   Dual-core SMP counter demo (gr712rc)
 │   ├── 03-five-uarts/        Five-UART traffic demo with TCP socket backends
-│   └── 04-mkprom-boot/       Self-bootable PROM image built with mkprom2
+│   ├── 04-mkprom-boot/       Self-bootable PROM image built with mkprom2
+│   ├── 05-scriptable-stub/   Scriptable AMBA device (Lua + YAML)
+│   ├── 07-hello-gr740/       Single-core RTEMS hello world (gr740)
+│   └── 08-gr740-smp/         Quad-core SMP counter demo (gr740)
 ├── qemu/                     QEMU 8.2.2 source tree (patched)
 └── toolchain/                Gaisler tools (RCC, BCC2, mkprom2 — not in git)
 ```
@@ -161,6 +178,50 @@ have access to a `sim` table for logging, virtual time, and IRQ control.
 See [`docs/04-debugging.md §7`](docs/04-debugging.md) for the
 `gr712rc-diag` log format that catches accesses to unmodeled peripherals.
 
+### 07 — Hello world on GR740 (single-core)
+
+```bash
+cd apps/07-hello-gr740
+make run
+```
+
+Expected output:
+
+```
+*** GR740 RTEMS Hello World ***
+Running on QEMU
+*** END OF TEST ***
+```
+
+Built with `-qbsp=gr740`; runs on `-M gr740`. CPUs 1–3 stay halted; only
+CPU 0 executes the Init task. The kernel ELF is linked at physical
+`0x00000000` (NGMP SDRAM via L2C); a 5-instruction trampoline in PROM at
+`0xC0000000` jumps to the kernel entry on reset.
+
+### 08 — Quad-core timer on GR740 (SMP)
+
+```bash
+cd apps/08-gr740-smp
+make run
+```
+
+Expected output (counters from all four cores interleaved):
+
+```
+Core 0: 10
+Core 1: 20
+Core 2: 30
+Core 3: 40
+Core 0: 11
+Core 1: 21
+...
+```
+
+Built with `-qbsp=gr740_smp`; runs on `-M gr740 -smp 4`. One affinity-pinned
+counter task per CPU. Each per-CPU clock interrupt is dispatched through
+IRQMP, confirming the `cpu-start` MPSTATUS-release path works for all
+three secondary CPUs.
+
 ## QEMU patches
 
 The following files in the QEMU tree are modified or added relative to the upstream 8.2.2 tag:
@@ -168,10 +229,12 @@ The following files in the QEMU tree are modified or added relative to the upstr
 | File | Change |
 |------|--------|
 | `hw/sparc/gr712rc.c` | New — GR712RC machine definition |
-| `include/hw/sparc/gr712rc.h` | New — GR712RC memory map constants |
-| `hw/sparc/Kconfig` | Registers `gr712rc` machine |
-| `hw/sparc/meson.build` | Adds `gr712rc.c` to the build |
-| `configs/devices/sparc-softmmu/default.mak` | Enables `GR712RC` config symbol |
+| `hw/sparc/gr712rc.h` | New — GR712RC memory map constants |
+| `hw/sparc/gr740.c` | New — GR740 machine definition |
+| `hw/sparc/gr740.h` | New — GR740 memory map constants |
+| `hw/sparc/Kconfig` | Registers `gr712rc` and `gr740` machines |
+| `hw/sparc/meson.build` | Adds `gr712rc.c` and `gr740.c` to the build |
+| `configs/devices/sparc-softmmu/default.mak` | Enables `GR712RC` and `GR740` config symbols |
 | `hw/intc/grlib_irqmp.c` | SMP: MPSTATUS CPU-release, per-CPU mask registers, `ncpu` property |
 | `include/hw/sparc/grlib.h` | Adds `grlib_irqmp_ack_cpu` declaration |
 | `target/sparc/cpu.h` | Adds `leon3_cpuid` field (preserved across CPU reset) |
