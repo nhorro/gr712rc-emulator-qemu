@@ -14,6 +14,10 @@ apps/*/probe.log
 # Local QEMU build directory (built on host).
 qemu/build/
 
+# Local Python venv used for host-side service development.
+service/.venv/
+service/*.egg-info/
+
 # Git internals and editor metadata.
 .git/
 .gitignore

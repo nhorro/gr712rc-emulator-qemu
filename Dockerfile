@@ -71,16 +71,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # QEMU binary + pc-bios + share files from the builder.
 COPY --from=qemu-builder /qemu-install /usr/local
 
-# Working directory for ELF uploads (Phase 2 will write here).
-RUN mkdir -p /var/uploads
-WORKDIR /work
+# Adapter service. Installed editable so a bind-mount of service/ during
+# development picks up code changes without an image rebuild.
+COPY service/ /opt/service/
+RUN pip install --no-cache-dir /opt/service
 
-# Phase 1: no service yet. The default command prints the QEMU version
-# so a `docker run --rm <image>` confirms the build works. Override with
-# any qemu-system-sparc invocation, e.g.:
-#
-#   docker run --rm -it -v $(pwd)/apps/01-hello-rtems:/work \
-#       <image> qemu-system-sparc -M gr712rc -nographic -kernel hello.exe
-#
-# Phase 2 will replace the CMD with the FastAPI service entrypoint.
-CMD ["qemu-system-sparc", "--version"]
+ENV UPLOADS_DIR=/var/uploads
+RUN mkdir -p /var/uploads
+WORKDIR /opt/service
+
+EXPOSE 8080
+CMD ["uvicorn", "adapter.main:app", \
+     "--host", "0.0.0.0", "--port", "8080", \
+     "--log-level", "info"]

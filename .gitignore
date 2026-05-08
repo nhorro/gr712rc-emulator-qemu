@@ -19,3 +19,9 @@ qemu/build/
 apps/**/*.exe
 apps/**/gr712rc-prom.elf
 apps/**/gr712rc-prom.bin
+
+# Python service venv and packaging artifacts
+service/.venv/
+service/*.egg-info/
+service/**/__pycache__/
+service/**/*.pyc

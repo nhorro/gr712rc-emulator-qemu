@@ -1,0 +1,24 @@
+# GR712RC / GR740 emulator + adapter service.
+#
+# Usage:
+#   docker compose up --build
+#
+# Then upload an ELF and drive the session over HTTP/WebSocket. See
+# docs/07-adapter-api.md for the full protocol and docs/08-running-the-
+# service.md for a worked walkthrough.
+
+services:
+  emulator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: qemu-gr712rc-emulator:latest
+    container_name: qemu-gr712rc-emulator
+    ports:
+      - "8080:8080"
+    # Uploads live in a tmpfs so they're wiped on restart, matching the
+    # spec's "ephemeral uploads" contract. Sized at 64 MiB so the 32 MiB
+    # per-file limit is never the bottleneck.
+    tmpfs:
+      - /var/uploads:size=64m
+    restart: unless-stopped
