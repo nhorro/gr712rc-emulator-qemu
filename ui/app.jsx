@@ -1,6 +1,7 @@
 /* global React, ReactDOM, useStore, api,
-   TopBar, ActivityBar, StatusBar, SidePanel,
+   TopBar, ActivityBar, StatusBar, SidePanel, MachineView,
    UartPane, EventsPane, RegistersPane, MemoryPane, BreakpointsPane, CanPane, SpwPane,
+   GpioBoardPane, BusTimelinePane,
    TweaksPanel, useTweaks, TweakSection, TweakToggle, TweakRadio, TweakColor, Icon */
 
 const { useState, useMemo } = React;
@@ -8,6 +9,8 @@ const { useState, useMemo } = React;
 // Bottom row tab definitions — each one renders a different pane component.
 const BOTTOM_TABS = [
   { id: "events",  label: "Events",       icon: "log",  Comp: window.EventsPane },
+  { id: "bus",     label: "Bus timeline", icon: "spw",  Comp: window.BusTimelinePane },
+  { id: "gpio",    label: "GPIO",         icon: "bus",  Comp: window.GpioBoardPane },
   { id: "regs",    label: "Registers",    icon: "cpu",  Comp: window.RegistersPane },
   { id: "mem",     label: "Memory",       icon: "mem",  Comp: window.MemoryPane },
   { id: "bps",     label: "Breakpoints",  icon: "bp",   Comp: window.BreakpointsPane },
@@ -44,13 +47,19 @@ function App() {
       <TopBar />
       <div className="app-body">
         <ActivityBar active={activeView} onSelect={setActiveView} />
-        <SidePanel />
-        <div className="main">
-          <UartPane />
-          <div className="pane-row">
-            <ActiveBottom tabs={bottomTabs} active={bottom} onTab={setBottom} />
-            <RightInspector />
-          </div>
+        {activeView !== "machine" && <SidePanel />}
+        <div className="main" style={activeView === "machine" ? { gridTemplateRows: "1fr" } : null}>
+          {activeView === "machine" ? (
+            <MachineView />
+          ) : (
+            <>
+              <UartPane />
+              <div className="pane-row">
+                <ActiveBottom tabs={bottomTabs} active={bottom} onTab={setBottom} />
+                <RightInspector />
+              </div>
+            </>
+          )}
         </div>
       </div>
       <StatusBar />

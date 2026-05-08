@@ -102,6 +102,7 @@ function TopBar() {
 function ActivityBar({ active, onSelect }) {
   const items = [
     { id: "session", icon: "chip",  label: "Session" },
+    { id: "machine", icon: "bus",   label: "Machine inspector" },
     { id: "files",   icon: "file",  label: "Uploads" },
   ];
   return (

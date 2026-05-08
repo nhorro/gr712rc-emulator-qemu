@@ -44,6 +44,44 @@ const MACHINES = [
   },
 ];
 
+// ── GPIO mock state (no v0 endpoint — local test-bench only) ──
+// Pin layouts mirror what the FSW build expects on each board so the
+// machine view / GPIO panel labels make sense without a backend.
+const GPIO_LABELS = {
+  gr712rc: [
+    "STATUS_LED",     "HEARTBEAT",      "WDOG_FEED",      "SAFE_MODE",
+    "RX_VALID",       "TX_READY",       "PCDU_EN",        "AOCS_EN",
+    "PYRO_ARM_1",     "PYRO_FIRE_1",    "PYRO_ARM_2",     "PYRO_FIRE_2",
+    "SUN_SENS_RDY",   "STAR_TRK_RDY",   "GYRO_RDY",       "MAG_RDY",
+    "RW_X_EN",        "RW_Y_EN",        "RW_Z_EN",        "MTQ_EN",
+    "TC_RX",          "TM_TX",          "EXT_INT_0",      "EXT_INT_1",
+    "TEMP_ALERT_1",   "TEMP_ALERT_2",   "OVR_CURR",       "UNDR_VOLT",
+    "USR_GPIO_28",    "USR_GPIO_29",    "USR_GPIO_30",    "USR_GPIO_31",
+  ],
+  gr740: [
+    "STATUS_LED",     "HEARTBEAT",      "WDOG_FEED",      "SAFE_MODE",
+    "PCDU_EN",        "AOCS_EN",        "TC_RX",          "TM_TX",
+    "PYRO_ARM",       "PYRO_FIRE",      "RW_EN",          "MTQ_EN",
+    "EXT_INT_0",      "EXT_INT_1",      "TEMP_ALERT",     "OVR_CURR",
+  ],
+};
+const GPIO_DIRS = {
+  gr712rc: [1,1,1,1, 0,0,1,1, 1,1,1,1, 0,0,0,0, 1,1,1,1, 0,1,0,0, 0,0,0,0, 1,0,1,0],
+  gr740:   [1,1,1,1, 1,1,0,1, 1,1,1,1, 0,0,0,0],
+};
+
+function makeGpio(machineId) {
+  const labels = GPIO_LABELS[machineId] || GPIO_LABELS.gr712rc;
+  const dirs   = GPIO_DIRS[machineId]   || GPIO_DIRS.gr712rc;
+  return labels.map((label, n) => ({
+    n, label,
+    dir: dirs[n] ? "out" : "in",
+    level: 0,
+    lastChange: null,
+    history: [],
+  }));
+}
+
 // ── Initial-state helpers (only used before the first API call returns) ──
 function makeRegs(pc) {
   const z = "0x00000000";
@@ -81,6 +119,9 @@ const store = createStore({
   breakpoints: [],
   canFrames: [],
   spwPackets: [],
+  // GPIO is local-only (no v0 endpoint); seeded for the default machine.
+  gpio: makeGpio("gr712rc"),
+  busPaused: false,
   toasts: [],
   termWrap: true,
   termTimestamps: true,
@@ -324,7 +365,10 @@ const api = {
     store.set({ cpu: n });
     api.refreshRegisters();
   },
-  setDraft(patch) { store.set(patch); },
+  setDraft(patch) {
+    store.set(patch);
+    if (patch.draftMachine) store.set({ gpio: makeGpio(patch.draftMachine) });
+  },
   selectKernel(url) { store.set({ selectedKernel: url }); },
   removeUpload(id) {
     store.set((s) => ({
@@ -340,6 +384,34 @@ const api = {
   _sendUart(n, text) {
     _uartWS[n]?.send(text);
   },
+
+  // ── GPIO (local test-bench, no v0 endpoint) ─────────────
+  _driveGpio(idx, level, userDriven) {
+    const s = store.get();
+    const pin = s.gpio[idx];
+    if (!pin || pin.level === level) return;
+    const t = Date.now();
+    const next = s.gpio.slice();
+    next[idx] = {
+      ...pin, level, lastChange: t,
+      history: pin.history.concat([{ t, level }]).slice(-200),
+    };
+    store.set({ gpio: next });
+    if (userDriven) {
+      pushEvent({ type: "info", text: `GPIO[${idx}] ${pin.label} → ${level}` });
+    }
+  },
+  toggleGpio(idx) {
+    const s = store.get();
+    const pin = s.gpio[idx];
+    if (!pin || pin.dir !== "in") return;
+    api._driveGpio(idx, pin.level ? 0 : 1, true);
+    toast({ kind: "info", title: `GPIO[${idx}] ${pin.label}`, sub: `host drove ${pin.level ? 0 : 1}` });
+  },
+  syncGpioForMachine(machineId) {
+    store.set({ gpio: makeGpio(machineId) });
+  },
+  setBusPaused(p) { store.set({ busPaused: p }); },
 };
 
 // ── Helpers ────────────────────────────────────────────────
