@@ -22,9 +22,10 @@ run: $(TARGET)
 	$(QEMU) $(QFLAGS) -kernel $(TARGET)
 
 # Convenience: run the echo peer in the foreground.  Use a separate
-# terminal — this blocks.
+# terminal — this blocks.  QEMU is the TCP listener (see QFLAGS), so
+# the peer dials in with --connect.  Start `make run` first.
 peer:
-	python3 $(dir $(abspath $(lastword $(MAKEFILE_LIST))))../../tools/spw-echo-peer.py --port $(PEER_PORT) -v
+	python3 $(dir $(abspath $(lastword $(MAKEFILE_LIST))))../../tools/spw-echo-peer.py --port $(PEER_PORT) --connect -v
 
 clean:
 	rm -f $(TARGET)

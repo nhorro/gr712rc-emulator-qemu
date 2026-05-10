@@ -23,12 +23,10 @@ big-endian counter.
 
 ## Running
 
-In one terminal, start the echo peer (listens on TCP 5101 by default):
+QEMU is the TCP **listener** (`server=on,wait=off` in the chardev),
+so start it first and have the peer dial in.
 
-    python3 ../../tools/spw-echo-peer.py --port 5101 -v
-
-In another terminal, run QEMU with `spw0` connected as a TCP **client**
-of the peer (so the peer's listen socket is the server):
+In one terminal, start QEMU:
 
     make run
 
@@ -36,9 +34,16 @@ That uses the chardev configuration:
 
     -chardev socket,id=spw0,host=0.0.0.0,port=5101,server=on,wait=off
 
-…which makes QEMU the listener.  If you prefer QEMU as the listener
-and the peer as the client, swap `server=on` to `server=off` here and
-add `--connect` to the peer.
+In another terminal, start the echo peer in client mode:
+
+    make peer
+    # equivalent to:
+    # python3 ../../tools/spw-echo-peer.py --port 5101 --connect -v
+
+If you prefer the peer as the listener and QEMU as the client, swap
+`server=on` to `server=off` in the Makefile's `QFLAGS` and drop
+`--connect` from the peer invocation.  In that case start the peer
+first.
 
 ## Files
 

@@ -366,20 +366,40 @@ function CanPane({ tabs, active, onTab }) {
 // ── SpaceWire ────────────────────────────────────────────
 function SpwPane({ tabs, active, onTab }) {
   const pkts = useStore((s) => s.spwPackets);
+  const session = useStore((s) => s.session);
+  const peerPort = session?.spw_peer_ports?.[0];
+  const isTx = (t) => t === "TX_PKT" || t === "TC_PKT" || (t || "").includes("WR");
   return (
     <Pane tabs={tabs} active={active} onTab={onTab}>
+      {peerPort && (
+        <div className="reg-toolbar">
+          <span className="faint">External peer: connect to</span>
+          <span className="inline-code">127.0.0.1:{peerPort}</span>
+          <span className="faint">e.g. <span className="inline-code">spw-echo-peer.py --port {peerPort} --connect</span></span>
+        </div>
+      )}
       <div className="bus-table">
         <div className="bus-row spw head">
-          <span>Time</span><span>Src</span><span>Dst</span><span>Type</span><span>Len</span><span>Address</span>
+          <span>Time</span><span>Src</span><span>Dst</span><span>Type</span><span>Len</span><span>Payload</span>
         </div>
+        {pkts.length === 0 && (
+          <div className="pane-empty">
+            <Icon name="log" size={36} />
+            <div className="title">No SpaceWire traffic yet</div>
+            <div className="sub"><span className="inline-code">WS /ws/spw/0</span> streams packets as they cross the QEMU↔peer tap.</div>
+          </div>
+        )}
         {pkts.slice(-80).reverse().map((p, i) => (
           <div key={i} className="bus-row spw">
             <span className="ts">{tsShort(p.ts)}</span>
             <span className="id">{p.src}</span>
             <span className="id">{p.dst}</span>
-            <span className={p.type.includes("WR") || p.type === "TC_PKT" ? "dir-tx" : "dir-rx"}>{p.type}</span>
+            <span className={isTx(p.type) ? "dir-tx" : "dir-rx"}>{p.type}</span>
             <span>{p.len}</span>
-            <span className="data">{p.addr}</span>
+            <span className="data">
+              {p.addr}
+              {p.counter != null && <span className="faint"> · ctr={p.counter}</span>}
+            </span>
           </div>
         ))}
       </div>

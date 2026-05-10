@@ -291,6 +291,42 @@ async def ws_uart(websocket: WebSocket, n: int):
             pass
 
 
+@app.websocket("/ws/spw/{n}")
+async def ws_spw(websocket: WebSocket, n: int):
+    """Read-only stream of SpaceWire packet events from tap N.
+
+    Each frame is JSON: {type, port, ts, iso, dir, len, hex} for
+    packets, or {type, port, ts, iso, state} for connection state
+    transitions on the QEMU/peer sides.
+    """
+    if _session is None:
+        await websocket.close(code=1011)
+        return
+    if _session.status == "created":
+        await websocket.close(code=1011)
+        return
+    if n < 0 or n >= len(_session.spw_taps):
+        await websocket.close(code=1011)
+        return
+    tap = _session.spw_taps[n]
+    await websocket.accept()
+    queue = tap.subscribe()
+    try:
+        while True:
+            msg = await queue.get()
+            if msg is None:
+                break  # tap shut down
+            await websocket.send_json(msg)
+    except Exception:
+        pass
+    finally:
+        tap.unsubscribe(queue)
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
 @app.websocket("/ws/events")
 async def ws_events(websocket: WebSocket):
     if _session is None:
