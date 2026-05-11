@@ -17,7 +17,10 @@ MACHINES: dict[str, dict] = {
         "id": "gr740",
         "description": "GR740 quad-core LEON4",
         "cpus": 4,
-        "default_ram_mb": 256,
+        # Default matches the QEMU model's GR740_SDRAM_SIZE (2 GiB,
+        # the chip's architectural max).  Earlier 256 MiB was too small
+        # for real-HW RTEMS test binaries that allocate >256 MiB pools.
+        "default_ram_mb": 2048,
         "max_ram_mb": 2048,
         "uart_count": 1,
         "spw_count": 0,
