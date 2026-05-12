@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -18,6 +19,13 @@ from pathlib import Path
 from typing import Any, AsyncIterator, Optional
 
 from .machines import MACHINES
+from .spw import SpwTap
+
+# Base TCP port for SpW peer-side listeners. Chosen to match the port
+# used by apps/06-grspw-echo's standalone Makefile (5101) and to fit in
+# a small range that docker-compose can pre-publish without conflict.
+# Override with the SPW_PEER_PORT_BASE env var.
+SPW_PEER_PORT_BASE = int(os.environ.get("SPW_PEER_PORT_BASE", "5101"))
 
 
 class QMPError(Exception):
@@ -135,6 +143,14 @@ class QEMUSession:
         self._uart_count = MACHINES[machine]["uart_count"]
         self._uart_sockets = [self._runtime_dir / f"uart{i}.sock"
                               for i in range(self._uart_count)]
+        self._spw_count = MACHINES[machine].get("spw_count", 0)
+        # Taps are constructed here with deterministic peer ports
+        # (SPW_PEER_PORT_BASE + i) so docker-compose can publish them;
+        # asyncio.start_server runs in start(), at which point the
+        # listeners are actually bound.
+        self._spw_taps: list[SpwTap] = [
+            SpwTap(i, peer_port=SPW_PEER_PORT_BASE + i)
+            for i in range(self._spw_count)]
 
         self._process: Optional[asyncio.subprocess.Process] = None
         self._qmp: Optional[QMPClient] = None
@@ -150,7 +166,16 @@ class QEMUSession:
     def uart_socket_path(self) -> list[Path]:
         return self._uart_sockets
 
+    @property
+    def spw_taps(self) -> list[SpwTap]:
+        return self._spw_taps
+
     def to_dict(self) -> dict:
+        # External peer ports for SpW links (where to point an external
+        # peer like tools/spw-echo-peer.py --connect). Empty until start()
+        # has bound the listeners.
+        spw_peer_ports = {tap.port_index: tap.peer_port
+                          for tap in self._spw_taps if tap.peer_port}
         return {
             "id": self.id,
             "machine": self.machine,
@@ -162,11 +187,17 @@ class QEMUSession:
             "started_at": (self.started_at.isoformat().replace("+00:00", "Z")
                            if self.started_at else None),
             "exit_code": self.exit_code,
+            "spw_peer_ports": spw_peer_ports,
         }
 
     async def start(self) -> None:
         if self.status != "created":
             raise QMPError(f"cannot start from state '{self.status}'")
+
+        # Bind SpW tap listeners first so QEMU can dial in immediately
+        # (the chardev is server=off,wait=off — QEMU connects out).
+        for tap in self._spw_taps:
+            await tap.start()
 
         cmd = self._build_command()
         # stderr inherits the service's stderr so spawn-time errors and
@@ -244,6 +275,11 @@ class QEMUSession:
             except asyncio.TimeoutError:
                 self._process.kill()
                 await self._process.wait()
+        for tap in self._spw_taps:
+            try:
+                await tap.stop()
+            except Exception:
+                pass
         # Clean up runtime directory (sockets, etc.).
         shutil.rmtree(self._runtime_dir, ignore_errors=True)
 
@@ -346,6 +382,17 @@ class QEMUSession:
             cmd.extend([
                 "-chardev", f"socket,id={chardev_id},path={sock},server=on,wait=off",
                 "-serial", f"chardev:{chardev_id}",
+            ])
+        for tap in self._spw_taps:
+            # QEMU acts as the TCP client (server=off) so the service's
+            # tap is the listener and stays in control of the link. The
+            # GRSPW2 model picks up chardev id "spw{N}". `wait` is not
+            # valid in client mode (QEMU rejects wait=off here).
+            cmd.extend([
+                "-chardev",
+                (f"socket,id=spw{tap.port_index},"
+                 f"host=127.0.0.1,port={tap.qemu_port},"
+                 f"server=off"),
             ])
         return cmd
 

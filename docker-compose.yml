@@ -16,6 +16,12 @@ services:
     container_name: qemu-gr712rc-emulator
     ports:
       - "8080:8080"
+      # SpaceWire peer-side listeners (one per GRSPW2 link). The
+      # service binds 5101+i for spw{i}; only `gr712rc` exposes spw0
+      # in this release, but the range is published up front so future
+      # spw1..spw5 work without recomposing the container. Override the
+      # base via SPW_PEER_PORT_BASE if 5101 conflicts with another tool.
+      - "5101-5106:5101-5106"
     # Uploads live in a tmpfs so they're wiped on restart, matching the
     # spec's "ephemeral uploads" contract. Sized at 64 MiB so the 32 MiB
     # per-file limit is never the bottleneck.

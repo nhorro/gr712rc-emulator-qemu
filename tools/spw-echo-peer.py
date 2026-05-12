@@ -78,6 +78,7 @@ def main() -> int:
 
     if args.connect:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         sock.connect((args.listen, args.port))
         peer = f"{args.listen}:{args.port}"
         print(f"[peer] connected to {peer}")
@@ -96,6 +97,7 @@ def main() -> int:
     try:
         while True:
             conn, addr = listener.accept()
+            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             peer = f"{addr[0]}:{addr[1]}"
             print(f"[peer] accepted {peer}")
             try:

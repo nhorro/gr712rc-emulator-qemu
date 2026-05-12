@@ -164,7 +164,8 @@ List the machine types the service can instantiate.
     "cpus": 2,
     "default_ram_mb": 64,
     "max_ram_mb": 1024,
-    "uart_count": 5
+    "uart_count": 5,
+    "spw_count": 1
   },
   {
     "id": "gr740",
@@ -172,12 +173,13 @@ List the machine types the service can instantiate.
     "cpus": 4,
     "default_ram_mb": 256,
     "max_ram_mb": 2048,
-    "uart_count": 1
+    "uart_count": 1,
+    "spw_count": 0
   }
 ]
 ```
 
-Field contract: `id` is the value clients pass to `POST /session`. `cpus` is the maximum addressable CPU count. `uart_count` is the number of WebSocket UART endpoints (`/ws/uart/0` … `/ws/uart/{uart_count-1}`).
+Field contract: `id` is the value clients pass to `POST /session`. `cpus` is the maximum addressable CPU count. `uart_count` is the number of WebSocket UART endpoints (`/ws/uart/0` … `/ws/uart/{uart_count-1}`). `spw_count` is the number of GRSPW2 SpaceWire taps (`/ws/spw/0` … `/ws/spw/{spw_count-1}`); `0` means the machine exposes no SpW links to the service in this release.
 
 ---
 
@@ -262,11 +264,14 @@ Get the current session.
   "ram_mb": 64,
   "created_at": "2026-05-08T12:34:56Z",
   "started_at": "2026-05-08T12:35:00Z",
-  "exit_code": null
+  "exit_code": null,
+  "spw_peer_ports": { "0": 51873 }
 }
 ```
 
 `started_at` is `null` while `status == "created"`. `exit_code` is non-null only when `status == "exited"`; values are integer (exit code from RTEMS `exit()`) or the string `"fatal"` (fatal trap).
+
+`spw_peer_ports` maps SpW link index (as a string key) to the TCP port on `127.0.0.1` where an external peer can connect (see §5.3). The map is empty until `status == "running"` (ports are bound at start) and for machines whose `spw_count` is `0`.
 
 #### Errors
 
@@ -478,6 +483,52 @@ Event types:
 | `error`  | `error`, `message` | Service-side error (e.g. QEMU died unexpectedly). After this, the session is unrecoverable; clients SHOULD `DELETE /session`. |
 
 On connection, the server emits the **current** status as a `status` event so clients can synchronize without polling `GET /session`.
+
+### 5.3 `WS /ws/spw/{n}`
+
+Read-only stream of GRSPW2 (SpaceWire) packet events for SpW link index `n`. `n` is in `[0, machine.spw_count)`.
+
+The service interposes between QEMU and an external peer (e.g. `tools/spw-echo-peer.py`) as a transparent TCP proxy, parses the chardev's 4-byte big-endian length framing, and publishes each packet as a JSON event on this endpoint. Bytes are forwarded verbatim between QEMU and the peer regardless of whether any UI is connected.
+
+**Frame format**: text frames containing JSON objects. Two `type` values:
+
+```json
+{ "type": "packet", "port": 0, "ts": 1715342400.123, "iso": "2026-05-08T12:35:00.123Z",
+  "dir": "tx", "len": 6, "hex": "fe000000000a" }
+{ "type": "state",  "port": 0, "ts": 1715342400.001, "iso": "2026-05-08T12:35:00.001Z",
+  "state": "qemu_connected" }
+```
+
+`packet` fields:
+
+| Field | Meaning |
+|---|---|
+| `port` | SpW link index (matches `{n}` in the path). |
+| `ts`   | Unix epoch seconds, float. Use for ordering. |
+| `iso`  | UTC timestamp in ISO-8601, useful for display. |
+| `dir`  | `"tx"` = QEMU → peer; `"rx"` = peer → QEMU. |
+| `len`  | Payload length in bytes (excludes the 4-byte length prefix). |
+| `hex`  | Lowercase hex of the full packet payload. The first byte is the SpW destination address; subsequent bytes are protocol-id + user payload as written to the GRSPW2 TX descriptor. |
+
+`state` fields:
+
+| `state` | Meaning |
+|---|---|
+| `qemu_connected` / `qemu_disconnected`     | The QEMU side of the tap accepted a connection (it does so once per session start) or lost it (process exit). |
+| `peer_connected` / `peer_disconnected`     | An external peer dialed in or hung up. The tap continues to publish QEMU-side packets even when no peer is connected. |
+
+**Connecting an external peer**: when a session is in `running` state, `GET /session` returns a `spw_peer_ports` map of `{port_index: tcp_port}`. Point an external peer at that TCP port. Example:
+
+```bash
+curl -s http://localhost:8080/session | jq .spw_peer_ports
+# { "0": 5101 }
+
+python3 tools/spw-echo-peer.py --port 5101 --connect -v
+```
+
+The peer-side listeners are bound on `0.0.0.0` so external peers can dial in. The default port assignment is `5101 + port_index` (override with the `SPW_PEER_PORT_BASE` env var); `docker-compose.yml` publishes `5101-5106` accordingly.
+
+This endpoint is one-way (server → client) in v0. Injecting packets from the UI is a v1-roadmap item; the external-peer side covers that need today.
 
 ---
 

@@ -144,6 +144,31 @@ function pushUart(idx, text) {
   });
 }
 
+function pushSpwPacket(msg) {
+  // Map the /ws/spw/{n} JSON frame to the row shape used by SpwPane.
+  // First byte of the packet is the SpW destination/path address;
+  // last 4 bytes are interpreted as a big-endian counter for the
+  // echo demo. Both are best-effort decoding.
+  const hex = msg.hex || "";
+  const dst = hex.length >= 2 ? "0x" + hex.slice(0, 2) : "—";
+  let counter = null;
+  if (msg.len >= 4 && hex.length >= 8) {
+    counter = parseInt(hex.slice(-8), 16) >>> 0;
+  }
+  const tail = hex.length > 32 ? hex.slice(0, 32) + "…" : hex;
+  const row = {
+    ts: msg.iso || new Date().toISOString(),
+    port: msg.port,
+    src: "—",
+    dst,
+    type: msg.dir === "tx" ? "TX_PKT" : "RX_PKT",
+    len: msg.len,
+    addr: tail,
+    counter,
+  };
+  store.set((s) => ({ ...s, spwPackets: s.spwPackets.concat([row]).slice(-500) }));
+}
+
 function pushEvent(ev) {
   store.set((s) => ({
     ...s,
@@ -180,6 +205,7 @@ async function http(method, path, { body, isForm } = {}) {
 // ── WebSocket plumbing ────────────────────────────────────
 let _evtWS = null;
 let _uartWS = {};
+let _spwWS = {};
 
 function _openEventsWS() {
   if (_evtWS) return;
@@ -227,10 +253,25 @@ function _openUartWS(n) {
   _uartWS[n] = ws;
 }
 
+function _openSpwWS(n) {
+  if (_spwWS[n]) return;
+  const ws = new WebSocket(`${WS_BASE}/ws/spw/${n}`);
+  ws.onmessage = (ev) => {
+    let msg; try { msg = JSON.parse(ev.data); } catch { return; }
+    if (msg.type === "packet") pushSpwPacket(msg);
+    // "state" frames (qemu_connected/peer_connected/...) are observable
+    // but we don't surface them in the table; could later route to events.
+  };
+  ws.onclose = () => { delete _spwWS[n]; };
+  _spwWS[n] = ws;
+}
+
 function _closeAllWS() {
   if (_evtWS) { _evtWS.close(); _evtWS = null; }
   Object.values(_uartWS).forEach((w) => { try { w.close(); } catch {} });
   _uartWS = {};
+  Object.values(_spwWS).forEach((w) => { try { w.close(); } catch {} });
+  _spwWS = {};
 }
 
 // ── Public API surface (consumed by panels.jsx, sidepanel.jsx, etc.) ──
@@ -289,7 +330,7 @@ const api = {
     };
     try {
       const session = await http("POST", "/session", { body });
-      store.set({ session, uartLines: {}, events: [], uptimeMs: 0 });
+      store.set({ session, uartLines: {}, events: [], spwPackets: [], uptimeMs: 0 });
       _openEventsWS();
       // UART socket connects after start (the chardev socket isn't there until QEMU runs).
     } catch (e) {
@@ -306,9 +347,11 @@ const api = {
     try {
       const session = await http("POST", path);
       store.set({ session });
-      // After start/reset, hook UART 0 if not already.
+      // After start/reset, hook UART 0 and SpW taps if not already.
       if (path === "/session/start" || path === "/session/reset") {
         _openUartWS(0);
+        const ports = session?.spw_peer_ports || {};
+        Object.keys(ports).forEach((idx) => _openSpwWS(+idx));
       }
     } catch (e) {
       toast({ kind: "warn", title: errTitle, sub: e.message });
@@ -318,7 +361,7 @@ const api = {
   async deleteSession() {
     _closeAllWS();
     try { await http("DELETE", "/session"); } catch {}
-    store.set({ session: null, uartLines: {}, events: [], uptimeMs: 0 });
+    store.set({ session: null, uartLines: {}, events: [], spwPackets: [], uptimeMs: 0 });
     toast({ kind: "info", title: "Session deleted", sub: "DELETE /session → 204" });
   },
 
@@ -446,7 +489,11 @@ Object.assign(window, {
     const session = await http("GET", "/session");
     store.set({ session });
     _openEventsWS();
-    if (session.status !== "created") _openUartWS(0);
+    if (session.status !== "created") {
+      _openUartWS(0);
+      const ports = session?.spw_peer_ports || {};
+      Object.keys(ports).forEach((idx) => _openSpwWS(+idx));
+    }
   } catch {
     // 404 — no session, that's the normal startup state.
   }

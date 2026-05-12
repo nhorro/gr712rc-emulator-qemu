@@ -1,23 +1,20 @@
 /*
- * GRSPW2 (SpaceWire) round-trip demo for GR712RC / RTEMS.
+ * GRSPW2 (SpaceWire) round-trip demo for GR740 / RTEMS.
  *
- * Once a second, this app sends a 4-byte big-endian uint32 counter over
- * SpW link 0 (port at 0x80100500) and waits for the external echo peer
- * to reply with the value incremented by one.  Result is printed to the
- * console (UART0) as
+ * Mirror of apps/06-grspw-echo, but built for -M gr740 and pointing at
+ * the GR740 SpW0 register window (0xFF901000).
+ *
+ * Once a second, sends a 4-byte big-endian uint32 counter over SpW link
+ * 0 and waits for the external Python peer (tools/spw-echo-peer.py) to
+ * reply with the value incremented by one.  Result is printed to UART0:
+ *
  *     sent=N recv=N+1 OK
  *
- * The QEMU GRSPW2 model uses a CharBackend with the chardev id "spw0".
- * Connect an external peer with:
- *
- *   -chardev socket,id=spw0,host=0.0.0.0,port=5101,server=on,wait=off
- *
- * The peer (tools/spw-echo-peer.py) reads framed packets — 4-byte BE
- * length, then payload — increments the trailing uint32, and writes the
- * frame back.
- *
- * Build:
- *   sparc-gaisler-rtems5-gcc -qbsp=gr712rc grspw_echo.c -o grspw_echo.exe
+ * Run:
+ *     # terminal A
+ *     make run
+ *     # terminal B
+ *     make peer
  */
 
 #define CONFIGURE_INIT
@@ -40,7 +37,7 @@
 
 /* ---- GRSPW2 register layout (subset used here) -------------------------- */
 
-#define GRSPW0_BASE 0x80100500u
+#define GRSPW0_BASE 0xFF901000u   /* GR740: 8 ports at 0xFF901000..0xFF908000 */
 
 typedef struct {
     volatile uint32_t ctrl;       /* 0x00 */
@@ -79,7 +76,9 @@ typedef struct {
  *
  * Volatile fields: the GRSPW2 device writes ctrl/len bits via DMA on RX
  * completion, so without `volatile` the compiler can hoist the load out
- * of the poll loop and miss the device's updates.
+ * of the poll loop and miss the device's updates.  Bit me on GR740 where
+ * -O2 + the BSP's call-graph led GCC to cache rx_ring[i].ctrl across
+ * iterations of the polling loop.
  */
 
 typedef struct {
@@ -95,22 +94,12 @@ typedef struct {
 } rxbd_t;
 
 #define TX_RING_COUNT 4
-/* RX ring sized for the QEMU CharBackend's batching behaviour — when the
- * Python peer feeds many echoes between QEMU main-loop poll cycles, the
- * device delivers them all in one chr_receive call and we need enough
- * BDs to absorb the burst. */
 #define RX_RING_COUNT 32
 
 static txbd_t tx_ring[TX_RING_COUNT] __attribute__((aligned(1024)));
 static rxbd_t rx_ring[RX_RING_COUNT] __attribute__((aligned(1024)));
-
-/* RX scratch buffers (one per RX BD).  Size matches the 4-byte payload
- * plus margin so the peer can reply with arbitrary small frames. */
 static uint8_t rx_buf[RX_RING_COUNT][64] __attribute__((aligned(4)));
 
-/* Header buffer used by every TX (2 bytes: SpW destination addr +
- * protocol id).  Real SpaceWire frames need at least these two bytes
- * before payload — we leave them as zeros for the loopback demo. */
 static uint8_t tx_hdr[2] = { 0xFE, 0x00 };
 static uint8_t tx_payload[4];
 
@@ -128,8 +117,6 @@ static void grspw_reset_rings(void)
     memset(tx_ring, 0, sizeof tx_ring);
     memset(rx_ring, 0, sizeof rx_ring);
 
-    /* Pre-post all RX BDs: enable, point at scratch buffer, last one
-     * gets WR so the device wraps back to ring base. */
     for (i = 0; i < RX_RING_COUNT; i++) {
         rx_ring[i].addr = (uint32_t)&rx_buf[i][0];
         rx_ring[i].ctrl = RXBD_EN | (i == RX_RING_COUNT - 1 ? RXBD_WR : 0);
@@ -142,19 +129,13 @@ static void grspw_init(void)
 
     grspw_reset_rings();
 
-    /* Soft-init: clear sticky status, set link-start (we don't model SpW
-     * timing — the QEMU device transitions straight to Run state). */
-    r->status   = 0xFFFFFFFFu;
-    r->ctrl     = CTRL_LS | CTRL_AS;
-    r->clkdiv   = (9 << 0) | (9 << 8);   /* harmless; QEMU ignores */
-    r->dma_rxmax = 4096;
-
-    /* Ring base addresses — index field starts at 0. */
+    r->status     = 0xFFFFFFFFu;
+    r->ctrl       = CTRL_LS | CTRL_AS;
+    r->clkdiv     = (9 << 0) | (9 << 8);
+    r->dma_rxmax  = 4096;
     r->dma_txdesc = (uint32_t)&tx_ring[0];
     r->dma_rxdesc = (uint32_t)&rx_ring[0];
-
-    /* Enable RX and TX; clear all sticky bits. */
-    r->dma_ctrl = DMACTRL_TE | DMACTRL_RE | DMACTRL_PR | DMACTRL_PS;
+    r->dma_ctrl   = DMACTRL_TE | DMACTRL_RE | DMACTRL_PR | DMACTRL_PS;
 }
 
 static void grspw_send_counter(uint32_t counter)
@@ -163,7 +144,6 @@ static void grspw_send_counter(uint32_t counter)
     static int    head;
     txbd_t       *bd = &tx_ring[head];
 
-    /* Encode counter big-endian into payload. */
     tx_payload[0] = (counter >> 24) & 0xFF;
     tx_payload[1] = (counter >> 16) & 0xFF;
     tx_payload[2] = (counter >>  8) & 0xFF;
@@ -176,12 +156,9 @@ static void grspw_send_counter(uint32_t counter)
                 (sizeof tx_hdr & TXBD_HLEN_MASK);
 
     head = (head + 1) % TX_RING_COUNT;
-
-    /* Re-arm TX (idempotent). */
     r->dma_ctrl |= DMACTRL_TE;
 }
 
-/* Poll RX ring for a completed packet.  Returns the BD index, or -1. */
 static int grspw_poll_rx(void)
 {
     static int tail;
@@ -209,8 +186,6 @@ static uint32_t rxbd_payload_to_uint32_be(int idx)
     if (len < 4) {
         return 0;
     }
-    /* The peer echoes back exactly the frame we sent: 2-byte SpW header
-     * + 4-byte counter.  Last 4 bytes are the value. */
     p = &rx_buf[idx][len - 4];
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
            ((uint32_t)p[2] <<  8) |  (uint32_t)p[3];
@@ -231,15 +206,13 @@ rtems_task Init(rtems_task_argument arg)
 
     (void)arg;
 
-    printf("\n*** GR712RC GRSPW2 echo demo ***\n");
+    printf("\n*** GR740 GRSPW2 echo demo ***\n");
     printf("Sending one counter per second on SpW0 (0x%08x).\n",
            (unsigned)GRSPW0_BASE);
     printf("Connect a peer to QEMU's spw0 chardev (default port 5101).\n\n");
 
     grspw_init();
 
-    /* Quick sanity check: status register link-state field should be Run
-     * (5) after we asserted LS|AS in grspw_init(). */
     {
         uint32_t ls = (grspw0()->status >> 21) & 0x7;
         printf("SpW link state: %u (%s)\n",
@@ -249,16 +222,14 @@ rtems_task Init(rtems_task_argument arg)
     while (1) {
         int rx_idx;
         int drained = 0;
+        rtems_interval tps = rtems_clock_get_ticks_per_second();
 
         grspw_send_counter(counter);
-        rtems_task_wake_after(rtems_clock_get_ticks_per_second());
+        rtems_task_wake_after(tps);
 
-        /* Drain every BD that completed during the sleep window.  QEMU's
-         * chardev delivery is often bursty, so a single iteration may see
-         * 0, 1, or many echoes.  Pairing is "OK" when recv == counter+1
-         * (the echo of the just-sent counter); other values are flagged
-         * "(out of order)" — the data is correct, the iteration counter
-         * just lags behind the in-flight queue. */
+        /* Drain every BD that completed during the sleep window.  Each
+         * received echo prints its own line; counter/recv pairing isn't
+         * strict if QEMU's main loop delivers echoes in bursts. */
         while ((rx_idx = grspw_poll_rx()) >= 0) {
             uint32_t r = rxbd_payload_to_uint32_be(rx_idx);
             printf("sent=%u recv=%u %s\n",
