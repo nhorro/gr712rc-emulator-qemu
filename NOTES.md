@@ -137,6 +137,69 @@ work under GPLv2 (most interpretations). Mitigations:
 
 Estimated: 1–2 weeks for steps 1–2, another 2–3 weeks for step 3.
 
+## PoC results (steps 1 & 1.5, May 2026)
+
+The PoC entry points live in `qemu/system/main.c` (no separate binary;
+two flags on the existing `qemu-system-sparc`):
+
+- `--embed-poc [kernel]` — calls `qemu_init` with a hardcoded argv for
+  `-M gr712rc -kernel <kernel> -S`, then `qemu_cleanup(0)`, then returns.
+  Verifies the linking premise: init and cleanup are drivable from a
+  custom main without entering `qemu_main_loop`.
+- `--embed-poc-step <kernel> <dt_us> <n_steps> [clock]` — step-drives
+  QEMU in fixed-size slices and prints per-step CSV on stdout, summary
+  on stderr. `clock=0` uses `QEMU_CLOCK_REALTIME`, `clock=1` uses
+  `QEMU_CLOCK_VIRTUAL` with auto-injected `-icount shift=auto,sleep=off`.
+
+### Findings that override the earlier sketch above
+
+- **`qemu_init` returns with the iothread mutex held by the caller**.
+  The sketch at lines 71–79 calls `qemu_mutex_lock_iothread()` before
+  `vm_start()` — that double-locks and trips an assertion in
+  `system/cpus.c:504`. Correct discipline: inherit the mutex from
+  `qemu_init`, hold it across the step lifecycle, release it only when
+  the surrounding host needs to free it between steps.
+
+- **`QEMU_CLOCK_VIRTUAL` timers do not wake `main_loop_wait` without
+  `-icount`**. The main loop's timer list group (`main_loop_tlg`) only
+  carries `QEMU_CLOCK_REALTIME` and `QEMU_CLOCK_HOST` timers. Virtual-
+  clock timers are dispatched by vCPU/AIO contexts; without the
+  `-icount` warp-timer machinery, the main thread has no reliable wake
+  path when a virtual-clock timer fires. A timer on
+  `QEMU_CLOCK_REALTIME` works without icount but binds virtual time to
+  wall-clock.
+
+- **`-nographic` auto-cables monitor+serial to stdio**. Use explicit
+  `-display none -monitor none -serial file:...` when stdout must be
+  reserved for application output (we use stdout for the CSV).
+
+### Measured behaviour at 1 ms steps
+
+| Configuration | Steps | Mean step (wall) | Median overshoot | Status |
+|---|---|---|---|---|
+| REALTIME, single-core (hello) | 200/200 | 1.098 ms | 90 µs (9%) | OK |
+| REALTIME, SMP (dual-core-timer) | 500/500 | 1.168 ms | ~170 µs (17%) | OK |
+| VIRTUAL+icount, single-core (hello) | 0/200 | — | — | step loop stalls after guest exits (virtual clock freezes when vCPU halts) |
+| VIRTUAL+icount, SMP (dual-core-timer) | 0/200 | — | — | hangs during BSP boot (MPSTATUS handoff incompatible with icount; matches the "untested" warning in CLAUDE.md) |
+
+REALTIME at 1 ms is the viable path for the next milestone. Sim/wall is
+1.0× by construction (the clock *is* wall-clock); for HIL or
+wall-clock-paced SMP2 schedulers that is the desired semantics.
+
+### Open work for deterministic replay
+
+Bit-exact reproducibility requires `QEMU_CLOCK_VIRTUAL` + `-icount`,
+currently blocked by two issues in the gr712rc model (not in our
+embedding wrapper):
+
+1. **SMP startup under `-icount`**: the IRQMP MPSTATUS CPU-release
+   handshake needs auditing. CPU0/CPU1 ordering under
+   instruction-quantized time appears to deadlock during BSP init.
+2. **Halted vCPUs under `-icount`**: when guests reach `wfi` or call
+   `exit()`, the virtual clock stops advancing and a step-loop timer at
+   `now + dt` is unreachable. Needs either `sleep=on` semantics (warp
+   to next deadline) or an explicit "advance virtual time" helper.
+
 ## Related branch
 
 - `feat/configurable-peripherals` — orthogonal work on a JSON-driven machine
