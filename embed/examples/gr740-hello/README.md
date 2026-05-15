@@ -74,28 +74,45 @@ make -C embed/examples/gr740-hello run DT_US=500 N_STEPS=4000
 ## Architecture
 
 ```
-embed/examples/gr740-hello/   (this dir — consumer-side glue)
-    Makefile                  orchestration + invocation
-    README.md                 this file
+embed/examples/gr740-hello/      (this dir — consumer-side glue)
+    Makefile                     orchestration + invocation
+    README.md                    this file
 
-qemu/examples/embed-gr740/    (host driver source, inside submodule)
-    main.c                    own int main(), calls qemu_init/cleanup
-                              and drives the step loop
+qemu/examples/embed-gr740/       (inside submodule)
+    embed_qemu.h                 reusable embedding API surface
+    embed_qemu.c                 implementation (init/step/cleanup)
+    main.c                       thin example consumer
 
-qemu/build/embed-gr740        produced binary; links against
-                              libqemu-sparc-softmmu.fa
+qemu/build/embed-gr740           produced binary; links against
+                                 libqemu-sparc-softmmu.fa
 ```
 
-The host driver C source lives inside the QEMU submodule today
-because that is where `meson.build` lives — meson aggregates QEMU's
-internal object files into a single static library and the driver
-must be linked against it from inside the same build tree.
+The host driver source lives inside the QEMU submodule today because
+that is where `meson.build` lives — meson aggregates QEMU's internal
+object files into a single static library, and any binary linking
+against them has to be declared from inside the same build tree.
 
-When `libqemu-system-sparc.so` is available (deuda #1 of
-`NOTES.md`'s "Open technical issues"), the driver source can move out
-of the submodule into this directory and link against the `.so` from
-a standalone Makefile. The Makefile target stays the same; only the
-build steps change.
+The embedding logic is split into a reusable API and a thin example:
+
+- **`embed_qemu.h` / `embed_qemu.c`** — three entry points
+  (`embed_qemu_init`, `embed_qemu_step`, `embed_qemu_cleanup`) plus a
+  `EmbedStepStats` telemetry struct. This is the surface any
+  future host (another machine example, a SMP2 `IModel` wrapper,
+  a test harness) consumes.
+- **`main.c`** — builds the QEMU argv for `-M gr740`, calls the API,
+  prints summary. Anything specific to *this* example (kernel path,
+  UART log location, step budget) lives here, not in the API.
+
+The API today targets `QEMU_CLOCK_REALTIME` only; the clock is not a
+parameter because VIRTUAL+icount is blocked by the two issues
+documented at the end of `NOTES.md`. The struct return value gives
+the surface room to grow without breaking callers.
+
+When `libqemu-system-sparc.so` is available (deuda #1 of NOTES.md's
+"Open technical issues"), `embed_qemu.{h,c}` migrate out of the
+submodule into this directory and link against the `.so` from a
+standalone Makefile. The API surface and `main.c` do not change; only
+the build path does.
 
 ## Caveats
 
