@@ -1,0 +1,79 @@
+# standalone-host: a host program that lives entirely outside the
+# QEMU source tree and links against libqemu-sparc.so to embed a
+# GR712RC or GR740 machine in-process.
+#
+# Build flow:
+#   1. Compile embed_qemu.c (the consumer-side wrapper, in ../..).
+#   2. Compile main.c (this example's main()).
+#   3. Link both with libqemu-sparc.so from qemu/build/.
+#
+# No QEMU headers, no QEMU build system. Pure gcc + Makefile.
+
+REPO       := $(abspath $(dir $(abspath $(lastword $(MAKEFILE_LIST))))../../..)
+EMBED_DIR  := $(REPO)/embed
+QEMU_BUILD := $(REPO)/qemu/build
+LIBQEMU    := $(QEMU_BUILD)/libqemu-sparc.so
+
+CC      := gcc
+CFLAGS  := -Wall -Wextra -O2 -g -I$(EMBED_DIR)
+LDFLAGS := -L$(QEMU_BUILD) -lqemu-sparc -Wl,-rpath,$(QEMU_BUILD)
+
+TARGET  := standalone-host
+OBJS    := main.o embed_qemu.o
+
+DT_US   ?= 1000
+N_STEPS ?= 2000
+
+GR740_KERNEL   := $(REPO)/apps/07-hello-gr740/hello.exe
+GR712RC_KERNEL := $(REPO)/apps/02-dual-core-timer/dual_core_timer.exe
+
+.PHONY: all run-gr740 run-gr712rc check-lib clean
+
+all: $(TARGET)
+
+main.o: main.c $(EMBED_DIR)/embed_qemu.h
+	$(CC) $(CFLAGS) -c main.c -o main.o
+
+embed_qemu.o: $(EMBED_DIR)/embed_qemu.c $(EMBED_DIR)/embed_qemu.h
+	$(CC) $(CFLAGS) -c $(EMBED_DIR)/embed_qemu.c -o embed_qemu.o
+
+$(TARGET): $(OBJS) check-lib
+	$(CC) $(OBJS) $(LDFLAGS) -o $(TARGET)
+
+check-lib:
+	@if [ ! -f "$(LIBQEMU)" ]; then \
+		echo "ERROR: $(LIBQEMU) not found."; \
+		echo ""; \
+		echo "Build it from the QEMU build tree (one time):"; \
+		echo "  cd $(REPO)/qemu && mkdir -p build && cd build \\"; \
+		echo "      && ../configure --target-list=sparc-softmmu \\"; \
+		echo "      && \$$(pwd)/pyvenv/bin/meson configure -Db_staticpic=true \\"; \
+		echo "      && ninja libqemu-sparc.so"; \
+		echo ""; \
+		echo "(b_staticpic=true is required so the static libs that the"; \
+		echo " .so pulls objects from are marked PIC-compatible.)"; \
+		exit 1; \
+	fi
+
+run-gr740: $(TARGET)
+	@if [ ! -x "$(GR740_KERNEL)" ]; then $(MAKE) -C $(REPO)/apps/07-hello-gr740; fi
+	@echo ""
+	@echo ">>> standalone-host: gr740 + hello"
+	./$(TARGET) gr740 $(GR740_KERNEL) $(DT_US) $(N_STEPS)
+	@echo ""
+	@echo "----- UART output -----"
+	@cat /tmp/standalone-host-gr740-uart.log 2>/dev/null || echo "(no log)"
+	@echo "------------------------"
+
+run-gr712rc: $(TARGET)
+	@if [ ! -x "$(GR712RC_KERNEL)" ]; then $(MAKE) -C $(REPO)/apps/02-dual-core-timer; fi
+	@echo ""
+	@echo ">>> standalone-host: gr712rc + dual_core_timer"
+	./$(TARGET) gr712rc $(GR712RC_KERNEL) $(DT_US) 3000
+	@echo ""
+	@echo "----- UART output -----"
+	@cat /tmp/standalone-host-gr712rc-uart.log 2>/dev/null || echo "(no log)"
+	@echo "------------------------"
+
+clean:
+	rm -f $(TARGET) $(OBJS) /tmp/standalone-host-*-uart.log
