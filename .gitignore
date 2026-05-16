@@ -29,3 +29,6 @@ service/**/*.pyc
 # MkDocs build output
 site/
 .docs-venv/
+
+# Secret apps
+.apps
