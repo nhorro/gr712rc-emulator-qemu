@@ -132,7 +132,31 @@ After `make -j$(nproc)` in `qemu/build/`:
 
 ```
 qemu/build/qemu-system-sparc      — the emulator binary
-qemu/build/trace/generated-*.h   — auto-generated trace event headers
+qemu/build/libqemu-sparc.so       — same emulator linked as a shared library
+                                    (see docs/11 and docs/12)
+qemu/build/trace/generated-*.h    — auto-generated trace event headers
 ```
 
 Incremental rebuilds are fast; only files that changed are recompiled.
+
+---
+
+## Embedding SDK (fork-only)
+
+Lives in a handful of files that together produce `libqemu-sparc.so`:
+
+```
+qemu/include/libqemu.h                       — public SDK header (consumers' API)
+qemu/include/sysemu/embed_api.h              — internal mirror, uses QEMU types
+qemu/include/sysemu/embed_machine_hooks.h    — machine-side registration API
+qemu/system/embed_api.c                      — implementations (~250 LOC)
+qemu/system/embed_api.map                    — linker version script (export allowlist)
+qemu/system/embed_api_stub.c                 — empty TU; satisfies meson shared_library
+```
+
+The machine code (`hw/sparc/gr712rc.c`, `hw/sparc/gr740.c`) calls
+`embed_internal_register_apb_pnp(...)` and `embed_internal_register_irqmp(...)`
+at the end of init so the SDK can route PnP-entry additions and IRQ raises
+to the right device. See [docs/12](12-host-side-peripherals.md) for the
+peripheral / IRQ / BQL API and [docs/11](11-embedding-as-library.md) for
+the lifecycle wrapper.

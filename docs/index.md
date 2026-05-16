@@ -54,6 +54,12 @@ the [`qemu/`](https://github.com/nhorro/qemu-gr712rc-fork) submodule.
   header `libqemu.h`, the example wrapper, the granularity sweep that
   froze the operating point at 1 ms REALTIME, and the bundled timing
   examples.
+- [Host-side peripherals via the SDK](12-host-side-peripherals.md) —
+  registering MMIO peripherals from your own host code without touching
+  QEMU sources: `embed_register_peripheral` with optional APB PnP entry,
+  `embed_mmio_write/read` for host-injected bus traffic, `embed_irq_*`
+  to raise IRQs from callbacks or worker threads, and the
+  `peripheral-test` 9-assertion harness covering both machines.
 
 ### Hardware reference
 

@@ -17,13 +17,19 @@ section at the end.
 ```
 +-------------------------+      +-------------------+
 | your host application   |      |  libqemu-sparc.so |
-|  (.c + your own main)   | ---> |  - 13 exported    |
+|  (.c + your own main)   | ---> |  - 20 exported    |
 |  #include <libqemu.h>   |      |    symbols        |
 |  -L .../qemu/build      |      |  - supports both  |
 |  -lqemu-sparc           |      |    -M gr712rc and |
 +-------------------------+      |    -M gr740       |
                                  +-------------------+
 ```
+
+This document covers the *lifecycle and timing* surface: getting the
+emulator running, stepping it, and tearing it down. For
+**registering peripherals**, **driving MMIO**, and **raising
+interrupts** from host code, see
+[Host-side peripherals via the SDK](12-host-side-peripherals.md).
 
 The host calls `qemu_init(argc, argv)` with an argv that selects
 machine, kernel, peripherals, etc. — the same shape
@@ -73,9 +79,20 @@ gcc your_main.c -I qemu/include -L qemu/build -lqemu-sparc \
 `-Wl,-rpath` is for development convenience; in production deploy
 the `.so` to a system library path or set `LD_LIBRARY_PATH`.
 
-The library exports exactly **13 symbols** plus a version tag (see
-`qemu/system/embed_api.map`). Everything else QEMU contains
-internally is hidden by a linker version script.
+The library exports **20 symbols** plus a version tag (see
+`qemu/system/embed_api.map`):
+
+- 10 native QEMU symbols for lifecycle, run-state, main loop, and timers
+  (documented in this file).
+- 8 fork-specific `embed_*` symbols for peripheral registration, MMIO
+  injection, IRQ control, and BQL acquisition (documented in
+  [docs/12-host-side-peripherals.md](12-host-side-peripherals.md)).
+- 2 fork-specific timer forwarders (`embed_timer_new_ns`,
+  `embed_timer_free` — paper-thin wrappers around QEMU's `static
+  inline` timer helpers).
+
+Everything else QEMU contains internally is hidden by the linker
+version script.
 
 ## Building `libqemu-sparc.so`
 
