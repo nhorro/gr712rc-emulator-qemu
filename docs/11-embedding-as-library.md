@@ -462,19 +462,42 @@ fixed shift for replay should write their own wrapper against
 `libqemu.h` directly with the shift baked into `qargv` before
 calling `qemu_init`.
 
-### Limitation: gr740 SMP is blocked
+### Limitation: SMP guests are degraded or hang under Model B
 
-gr740 SMP (4 active vCPUs) under `-icount` hangs at every shift
-value tested (Blocker B, see
-[docs/14-co-simulation-scheduling.md](14-co-simulation-scheduling.md)).
-The `gr740-lockstep` example side-steps this by using a
-single-core BSP build (`apps/07-hello-gr740` is `BSP=gr740`, not
-`gr740_smp`), so cores 1-3 stay halted at reset and only CPU 0
-makes progress under round-robin TCG.
+Investigation in May 2026 (memory entry for the session, plus
+`docs/14-co-simulation-scheduling.md`) traced this to **virtual-
+time starvation under `-icount` + round-robin TCG when the guest
+runs tight software-trap loops** — for example, RTEMS SMP ticket-
+lock acquire/release pairs (`ta 0x9` / `ta 0xA`) during the SMP
+coordination phase of boot.
 
-To run an SMP gr740 guest under Model B, Blocker B has to be
-resolved first (Camino C in docs/14 "Queued next steps").
-gr712rc SMP under Model B works fine.
+Symptom: external interrupts never fire. A 3-second
+representative run on gr740 SMP recorded 228,997 software traps
+and **zero** external interrupts — no timer ticks, no IPIs, no
+device IRQs. RTEMS SMP boot polls for state transitions that are
+driven by IPI-dispatched jobs; with no IPIs, the polling loops
+spin forever.
+
+Per-machine status under Model B:
+
+| Guest                                           | Status |
+| ---                                             | --- |
+| Single-core gr712rc or gr740 BSP (e.g. hello)   | Works. Doesn't need timer/IPI to complete. |
+| gr712rc SMP (`BSP=gr712rc_smp`, 2 active CPUs)  | **Degraded.** Trap density is lower with 2 CPUs, so the timer occasionally reaches compare-match. The bundled `gr712rc-lockstep` example produces ~10 lines of UART over 5 s of sim, vs ~100+ under Model A — a visible-but-not-fatal slowdown. |
+| gr740 SMP (`BSP=gr740_smp`, 4 active CPUs)      | **Hangs hard.** Trap density with 4 CPUs starves virtual time completely. No UART output at all. The bundled `gr740-lockstep` example side-steps this by using a single-core BSP build (`apps/07-hello-gr740`, `BSP=gr740`), so cores 1-3 stay halted at reset. |
+
+The mechanism is not a bug in the gr740 machine wiring (the
+`gr740_cpu_start` and `gr712rc_cpu_start` handlers are byte-for-
+byte identical and `info cpus` confirms all 4 vCPUs run under
+icount). It is an interaction between QEMU's `-icount` accounting
+in round-robin TCG and any guest that does software-trap-heavy
+inner loops.
+
+If you need SMP guests with realistic timer/IPI behavior, use
+Model A (REALTIME). Model B is appropriate for single-core
+guests, for SMP guests that complete their work without
+depending on timer ticks, or for use cases where the degraded
+gr712rc SMP timing is acceptable.
 
 ### Expected output (gr712rc with dual-core-timer, Model B)
 
@@ -741,16 +764,21 @@ this section documents what works, what doesn't, and why.
 
 **What works under `-icount` today:**
 
-- **gr712rc SMP** boots and runs cleanly under `-icount` via
-  plain `qemu-system-sparc` and via the Model B wrapper
-  (verified with `apps/02-dual-core-timer/dual_core_timer.exe`).
-- **Single-core guests on either machine** work via the Model B
-  wrapper under `shift=auto,sleep=on` (the wrapper default).
-  For plain `qemu-system-sparc`, `shift=8` and `shift=10` are
-  also usable on gr712rc; `shift=auto` from the CLI has been
-  observed to hang on some workloads but works through the
-  Model B wrapper on the workloads tested in
+- **Single-core guests on either machine** work cleanly via the
+  Model B wrapper under `shift=auto,sleep=on` (the wrapper
+  default). For plain `qemu-system-sparc`, `shift=8` and
+  `shift=10` are also usable on gr712rc; `shift=auto` from the
+  CLI has been observed to hang on some workloads but works
+  through the Model B wrapper on the workloads tested in
   `embed/examples/{gr712rc,gr740}-lockstep/`.
+- **gr712rc SMP** boots and runs **in degraded mode** under
+  `-icount` via plain `qemu-system-sparc` and via the Model B
+  wrapper (verified with `apps/02-dual-core-timer/dual_core_timer.exe`).
+  "Degraded" means timer ticks fire infrequently because virtual
+  time advances slowly during RTEMS's SMP ticket-lock spin loops.
+  Visible as ~10 lines of UART output over 5 s of sim, vs ~100+
+  under Model A on the same guest. See the limitation table in
+  [Mode B](#mode-b--icount-lockstep-opt-in) for details.
 - **VIRTUAL-clock-paced stepping in the wrapper** works:
   `embed_qemu_step_locked` arms the deadline on
   `QEMU_CLOCK_VIRTUAL`, the callback fires from the
@@ -766,12 +794,27 @@ this section documents what works, what doesn't, and why.
    (0, 4, 8, 10, 12, auto), regardless of `sleep=on`. The
    `gr740-lockstep` example side-steps this by pinning to a
    single-core BSP build (cores 1-3 stay halted at reset).
-   Suspected cause: the per-vCPU icount budget / deadline
-   handling in `accel/tcg/tcg-accel-ops-rr.c` when all four
-   vCPUs make active progress under round-robin TCG. Requires
-   deeper instrumentation to confirm — tracked as Blocker B in
-   `docs/14-co-simulation-scheduling.md` and queued for
-   investigation as Camino C.
+
+   **Root cause** (diagnosed May 2026, see
+   `docs/14-co-simulation-scheduling.md` and the
+   `gr740_cpu_start` discussion in
+   [Mode B](#mode-b--icount-lockstep-opt-in)): the gr740
+   machine wiring is fine and all 4 vCPUs do start under
+   icount (`info cpus` confirms each runs with its own PC).
+   The hang is virtual-time starvation: during RTEMS SMP boot
+   coordination, the BSP's `_Per_CPU_State_change` and
+   `_Per_CPU_Perform_jobs` functions poll for state transitions
+   triggered by IPI-dispatched jobs. The CPUs execute
+   `ta 0x9` / `ta 0xA` (IRQ-disable/enable) pairs at high
+   frequency. A 3-second representative trap log captured
+   228,997 software traps and **zero** external interrupts —
+   no timer tick ever reaches compare-match because virtual
+   time advances too slowly between traps. With no timer IRQs
+   and no IPIs, the SMP coordination loops never break out.
+   Refuted suspects: per-vCPU icount budget, `qemu_cpu_kick`
+   under rr-mode, ticket-lock atomicity, IPI delivery
+   mechanism — see Camino C section of docs/14 for the
+   evidence trail.
 
 2. **Fixed `shift` for replay-grade determinism**: the wrapper
    hardcodes `shift=auto` for portability. Bit-exact replay
