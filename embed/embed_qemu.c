@@ -31,6 +31,7 @@
 /* ----- Implementation ------------------------------------------------- */
 
 static QEMUTimer *step_timer;
+static volatile int step_deadline_hit;
 
 /*
  * exit() interception. QEMU has hundreds of error paths that route
@@ -62,10 +63,25 @@ void exit(int code)
     _exit(code);
 }
 
+/*
+ * Step deadline fired.  Two cases for the calling thread context:
+ *   - QEMU_CLOCK_REALTIME timer: callback runs in the main thread
+ *     (qemu_clock_run_all_timers in main_loop_wait).
+ *   - QEMU_CLOCK_VIRTUAL timer under -icount: callback runs in the
+ *     vCPU thread (icount_handle_deadline). Calling vm_stop directly
+ *     here would only QUEUE a vmstop_requested without changing the
+ *     runstate, leaving the wrapper's main_loop_wait loop spinning.
+ *
+ * To unify both cases: just flag and notify. The wrapper's loop
+ * picks up the flag and calls vm_stop synchronously from the
+ * iothread context, where do_vm_stop transitions the runstate
+ * correctly.
+ */
 static void step_deadline_cb(void *opaque)
 {
     (void)opaque;
-    vm_stop(RUN_STATE_PAUSED);
+    step_deadline_hit = 1;
+    qemu_notify_event();
 }
 
 int embed_qemu_init(int argc, char **argv)
@@ -91,10 +107,22 @@ int embed_qemu_step(int64_t dt_ns, EmbedStepStats *out)
 
     int64_t t0 = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
 
+    step_deadline_hit = 0;
     timer_mod_ns(step_timer, t0 + dt_ns);
     vm_start();
-    while (runstate_is_running()) {
+    /*
+     * Exit when either the step deadline fires (typical case) or
+     * the guest leaves the running state on its own (halted, exit,
+     * shutdown). Without the deadline_hit check, the VIRTUAL-clock
+     * + -icount path would spin forever: vm_stop from a vCPU-thread
+     * callback only queues a vmstop_requested and doesn't flip the
+     * runstate.
+     */
+    while (!step_deadline_hit && runstate_is_running()) {
         main_loop_wait(false);
+    }
+    if (step_deadline_hit) {
+        vm_stop(RUN_STATE_PAUSED);
     }
 
     int64_t t1 = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);

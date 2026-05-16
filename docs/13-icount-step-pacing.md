@@ -1,13 +1,26 @@
-# Design: `-icount` + VIRTUAL-clock step pacing (Option 3)
+# `-icount` + VIRTUAL-clock step pacing (Option 3)
 
-**Status**: design proposal, partial empirical baseline available.
+**Status**: implemented and measured (May 2026, second pass).
+**Sub-millisecond goal NOT achieved**; icount-mode opt-in
+SHIPPED as a side benefit.
 
-**Goal**: lower the `embed_qemu_step(dt)` per-step wall-clock floor
-from ~130 µs (gr712rc SMP) / ~230 µs (gr740 SMP) to ~5–20 µs at
-dt = 1 ms, **and** decouple guest time from wall-clock to enable
-deterministic replay. Preserves the host-as-time-master semantics
-of the SDK API: the host still says "advance N µs of guest time,
-return when done."
+**Original goal**: lower the `embed_qemu_step(dt)` per-step
+wall-clock floor from ~130 µs (gr712rc SMP) / ~230 µs (gr740 SMP)
+to ~5–20 µs at dt = 1 ms, **and** decouple guest time from
+wall-clock to enable deterministic replay. Preserves the
+host-as-time-master semantics of the SDK API.
+
+**Actual outcome (see Results section below)**: the per-step floor
+under `-icount` + VIRTUAL deadline is **structurally identical to
+REALTIME** — the floor is `pause_all_vcpus` cross-thread
+coordination cost, not the deadline-firing mechanism. icount does
+not deliver the sub-1 ms target. What it does deliver:
+- functional VIRTUAL-clock-paced stepping (Bug A turned out to be
+  in the SDK wrapper, not in QEMU; fix shipped);
+- guest virtual time advances faster than wall when CPUs idle
+  (`sleep=on` warp), useful for "skip idle periods" HIL flows;
+- foundation for deterministic replay (still needs host-side
+  peripherals to be virtual-time-paced).
 
 ## What this replaces and why
 
@@ -57,147 +70,173 @@ execution time for the budget plus a single notify back to the
 main thread. Per-step floor estimated at < 20 µs (no data yet —
 see acceptance criteria).
 
-## Two known blockers
+## Results (May 2026, second pass)
 
-The May 2026 audit (see `docs/11-embedding-as-library.md`
-§ Determinism / icount) characterised what works and what
-doesn't:
+### Blocker A was NOT a QEMU bug — it was in the SDK wrapper
 
-### Blocker A — VIRTUAL-clock timer doesn't wake `main_loop_wait`
+The hang traces as follows:
 
-The intended pattern is:
+1. Step timer (on `QEMU_CLOCK_VIRTUAL`) expires; under `-icount`
+   this happens inside `icount_handle_deadline`, which runs in
+   the **vCPU (rr_cpu_thread_fn) thread**.
+2. Wrapper's `step_deadline_cb` calls `vm_stop(RUN_STATE_PAUSED)`.
+3. `vm_stop` checks `qemu_in_vcpu_thread() == true`, so it does
+   NOT call `do_vm_stop`. Instead it queues
+   `vmstop_requested = PAUSED` and calls `qemu_notify_event()`.
+4. **Runstate stays RUNNING.** The actual transition would only
+   happen if someone (e.g. `qemu_main_loop` →
+   `main_loop_should_exit`) processed the queued request. The
+   embed wrapper uses its own `while (runstate_is_running())`
+   loop and never processes the queue. Hence: infinite spin in
+   `main_loop_wait`.
 
-```c
-step_timer = embed_timer_new_ns(QEMU_CLOCK_VIRTUAL, deadline_cb, NULL);
-...
-timer_mod_ns(step_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + dt);
-vm_start();
-while (runstate_is_running()) {
-    main_loop_wait(false);
-}
-```
+The wrapper-side fix:
 
-Empirically the timer callback DOES fire (in the
-`rr_cpu_thread_fn` context, via `icount_handle_deadline`) and
-`vm_stop` runs. But the host thread blocked in
-`main_loop_wait` → `ppoll` is never woken — no notify writes the
-main-loop eventfd. Result: indefinite hang.
+- Step callback no longer calls `vm_stop`. It atomically sets a
+  `step_deadline_hit` flag and calls `qemu_notify_event()` to
+  ensure the host thread's `ppoll` wakes.
+- The wrapper's step loop exits on `step_deadline_hit` (in
+  addition to `!runstate_is_running()`), and calls `vm_stop`
+  **synchronously from the iothread context**. There `vm_stop`
+  takes the `do_vm_stop` path, transitions runstate, pauses
+  vCPUs.
+- This works identically for REALTIME and VIRTUAL deadlines —
+  the flag pattern is thread-context-agnostic.
 
-This is the more tractable blocker. Suspected fix locations:
+This required exposing `qemu_notify_event` in the SDK
+(`qemu/include/libqemu.h` + `qemu/system/embed_api.map`), 1 new
+export.
 
-- `accel/tcg/icount-common.c` (deadline handling for virtual
-  timers).
-- Possibly add a `qemu_notify_event()` after virtual-timer
-  callback dispatch from `rr_cpu_thread_fn`.
+### Per-step floor under icount: structurally unchanged
 
-### Blocker B — gr740 SMP hangs under `-icount` at every shift
+Measured slip with the fixed wrapper + `-icount shift=10,sleep=on`
++ VIRTUAL-clock deadline on `gr712rc SMP / dual_core_timer`:
 
-With all four LEON4 cores active (e.g.
-`apps/08-gr740-smp/quad_core_timer.exe`), boot completes but
-the guest hangs once cores enter the idle loop. gr712rc SMP (2
-cores) works with the same configuration. Single-core gr740 with
-the other three cores halted-at-reset works.
+| dt      | Slip (icount + VIRTUAL) | Slip (REALTIME baseline) |
+| ---     | ---                     | ---                      |
+| 5 ms    | **−21.2%** (warp wins)  | +3.2%                    |
+| 1 ms    | +10.3%                  | +12.1%                   |
+| 100 µs  | **+150%**               | (~comparable)            |
+
+At dt = 5 ms the icount path runs *faster than real-time*
+because the guest spends most of its time idle waiting for clock
+ticks, and `sleep=on` warps virtual time forward over those
+idle gaps.
+
+At dt = 1 ms the warp benefit shrinks (less idle per step) and
+the per-step floor dominates again. At dt = 100 µs the floor
+COMPLETELY dominates: 1 s of sim takes 2.5 s of wall, i.e.
+~250 µs per step — same order of magnitude as the REALTIME path.
+
+**Conclusion**: icount changes the deadline trigger but does NOT
+remove `pause_all_vcpus` from each step. The cross-thread
+coordination cost (~120–200 µs on this hardware) is the
+structural floor, and is the same regardless of which clock the
+deadline is on.
+
+### Blocker B — gr740 SMP under `-icount` still hangs
+
+NOT investigated in this pass. With all four LEON4 cores active
+(e.g. `apps/08-gr740-smp/quad_core_timer.exe`), the guest hangs
+once cores enter the idle loop. gr712rc SMP (2 cores) works with
+the same configuration. Single-core gr740 with the other three
+cores halted-at-reset works.
 
 Suspected cause: `accel/tcg/tcg-accel-ops-rr.c`
 `icount_percpu_budget(cpu_count)` / `icount_handle_deadline`
 interaction when 4 vCPUs share the round-robin budget. Deeper
-than blocker A; needs instrumentation to identify the failure
-mode.
+investigation deferred — the original motivation for tackling it
+was sub-1 ms stepping, which icount cannot provide. Revisit if
+a determinism or "skip-idle" use case for gr740 SMP appears.
 
-## Plan
+## What shipped
 
-Tackle in order, lowest-risk first:
+- **`qemu_notify_event` exported in the SDK**
+  (`qemu/include/libqemu.h` prototype +
+  `qemu/system/embed_api.map` export). 1 new public symbol on
+  the .so, documented as "safe to call from any thread; wakes
+  any pending `main_loop_wait`'s ppoll." This unlocks the
+  flag-based pattern in any external host that wants to do
+  cross-thread signalling without taking the BQL.
+- **Wrapper rewrite**: `embed/embed_qemu.c` step callback uses
+  an atomic flag + `qemu_notify_event` instead of calling
+  `vm_stop` directly. The wrapper's step loop exits on the flag
+  and invokes `vm_stop` synchronously from the iothread context.
+  Works for REALTIME (current default) and VIRTUAL (icount mode,
+  opt-in).
+- **Small REALTIME regression** of ~0.5 pp on gr712rc and ~1.5 pp
+  on gr740 measured (~+3.7% vs +3.2% at dt = 5 ms on gr712rc
+  SMP). The extra cost is one additional `vm_stop` call from the
+  iothread context after `main_loop_wait` returns; on the old
+  path that work happened inline in the callback. Acceptable
+  trade-off for unblocking the VIRTUAL path.
 
-1. **Blocker A — investigate and fix the VIRTUAL-timer wake-up
-   path** (estimate: 3–5 days).
-   - Reproduce with a minimal host that arms a VIRTUAL timer and
-     waits in `main_loop_wait`.
-   - Trace whether `icount_handle_deadline` actually fires our
-     callback. If yes, instrument what's missing on the
-     notify-back path.
-   - Likely fix: `qemu_notify_event()` after virtual timers are
-     processed in `rr_cpu_thread_fn`, mirroring the existing
-     `all_cpu_threads_idle` path.
+## What did NOT ship
 
-2. **SDK plumbing on top of A** (estimate: 1–2 days).
-   - Add an opt-in `embed_qemu_init_icount(...)` or a flag on
-     `embed_qemu_init` that enables `-icount shift=10,sleep=on`
-     in the qargv and switches the step deadline from REALTIME
-     to VIRTUAL.
-   - Measure the floor on gr712rc SMP at dt = 1 ms, 500 µs, 100 µs.
-   - Acceptance: per-step wall < 20 µs at dt = 1 ms.
+- **Sub-1 ms operating point**. The pause/resume floor is
+  structural; neither Option 2 nor Option 3 moves it materially.
+- **icount mode as a first-class SDK feature**. The wrapper
+  still defaults to REALTIME. A consumer that wants icount-paced
+  stepping needs to instantiate the timer on `QEMU_CLOCK_VIRTUAL`
+  and add `-icount shift=10,sleep=on` to the qargv. That is
+  doable with the now-exposed API but is not packaged as a
+  one-liner.
+- **gr740 SMP under icount**. Blocker B is unchanged; gr740 SMP
+  still hangs at all shifts.
 
-3. **Blocker B — investigate gr740 SMP icount budget** (estimate:
-   5–10 days, higher uncertainty).
-   - Reproduce in isolation (without our wrapper). Already
-     known: plain `qemu-system-sparc -M gr740 -icount shift=X,sleep=on`
-     hangs for X ∈ {0, 4, 8, 10, 12, auto} with quad_core_timer.
-   - Instrument `icount_percpu_budget`, `icount_handle_deadline`,
-     and `rr_cpu_thread_fn`'s main loop to identify the failure
-     mode. Likely candidates: budget underflow, deadline race
-     specific to 4-vCPU dispatch, or interaction with sleep=on
-     warp when 4 CPUs idle simultaneously.
-   - Risk: this may be an upstream QEMU bug not specific to our
-     fork. If so, the path forward becomes either a fork-local
-     patch or upstream contribution.
+## Future work (only if motivated by a concrete use case)
 
-4. **Ship parity** (estimate: 1–2 days).
-   - With both blockers fixed, exercise the SDK API on gr712rc
-     SMP, gr740 single-core, and gr740 SMP. Make sure the bundled
-     examples can switch between REALTIME and icount modes.
+If a consumer of the SDK appears that needs either deterministic
+replay or "skip idle time" semantics, the path forward is:
 
-## Acceptance criteria
+1. **Package icount mode as an SDK option**. Add a flag or
+   alternate init function (e.g. `embed_qemu_init_icount`) that
+   sets up `-icount shift=10,sleep=on` and a VIRTUAL-clock
+   deadline. Trivial wrapper work; the underlying mechanism is
+   already proven on gr712rc.
+2. **Fix Blocker B for full machine parity**. Required so the
+   icount mode works on gr740 SMP. Estimated 5–10 days of
+   instrumentation + patching in
+   `accel/tcg/tcg-accel-ops-rr.c`. May turn out to be an
+   upstream QEMU issue; investigation needed first.
+3. **Determinism-aware host-side peripherals**. The host-side
+   peripheral SDK (`docs/12-host-side-peripherals.md`) fires MMIO
+   at wall-clock-driven moments today. For bit-exact replay
+   under icount, peripherals must inject events at virtual-time
+   moments. Not in scope here; would need its own design pass.
 
-The combined effort passes when:
+The sub-1 ms goal that motivated this exploration is closed: the
+data shows it is not achievable in the current pause/resume
+architecture on Linux + MTTCG. The HIL use cases targeted by the
+SDK are well served by the 5 ms REALTIME operating point already
+documented in `docs/11-embedding-as-library.md`.
 
-- gr712rc SMP and gr740 SMP both boot, clock-tick, and exit
-  cleanly under the icount-paced step path (4 SMP samples — the
-  same correctness gate Option 2 used).
-- `embed_qemu_step(dt = 1 ms)` mean wall < 30 µs on gr712rc SMP
-  and < 50 µs on gr740 SMP.
-- The example dt-sweep (1 ms / 500 µs / 100 µs / 10 µs) shows
-  near-flat wall per step until the sub-microsecond regime
-  where TCG execution itself starts to dominate.
+## Known constraints if/when icount mode is packaged
 
-If only Blocker A is unblocked but Blocker B remains, the SDK
-ships with a documented limitation: icount mode supported on
-gr712rc only, gr740 stays on the 5 ms REALTIME default. That is
-acceptable as a partial deliverable per the machine-parity rule
-in CLAUDE.md (the SDK feature exists for both machines; for
-gr740 the feature is gated as "limited to REALTIME pacing").
+If a future iteration ships `embed_qemu_init_icount` (point 1 of
+future work):
 
-## Risks
-
-1. **Blocker A might be more than one missing notify.** If the
-   icount deadline handler in QEMU 8.2.2 has structural reasons
-   for not waking the main loop (e.g. main loop polls icount
-   state separately), the fix may require reorganising the
-   wake-up path. Mitigation: tracing first, patch second.
-
-2. **Blocker B might be upstream.** If so, the resolution depends
-   on how the upstream QEMU maintainers respond. Mitigation:
-   keep the fork-local patch path open as the fallback.
-
-3. **`-icount` introduces non-determinism due to host-side
-   peripheral injection.** Host-side peripherals registered via
-   the SDK (see `docs/12-host-side-peripherals.md`) fire MMIO at
-   wall-clock-driven moments; under icount this breaks bit-exact
-   replay. Mitigation: document that determinism requires either
-   no host-side peripherals or that the host inject events at
-   virtual-time-defined moments. Wall-clock-paced step mode
-   remains available for HIL use cases.
-
-4. **Cache invalidation on shift change.** When `shift=auto`
-   adapts, the bias recomputation has a known race path that
-   left `qemu_icount_bias` in an unrecoverable state in our
-   audit. We will use a fixed shift (10) to side-step this.
+- **Use a fixed `shift=10`**. `shift=auto` accumulates an
+  unrecoverable `qemu_icount_bias` state and ends up with the
+  warp timer effectively unreachable in wall-clock terms. Audit
+  data is in `docs/11-embedding-as-library.md` § Determinism /
+  icount.
+- **Wall-clock-paced host-side peripherals break determinism**.
+  The host-side peripheral SDK (`docs/12-host-side-peripherals.md`)
+  fires MMIO at wall-clock-driven moments; under icount, this
+  breaks bit-exact replay. Determinism would require
+  virtual-time-paced injection — another design pass.
+- **gr740 SMP is blocked**. The Blocker B issue means quad-core
+  gr740 guests cannot use icount mode. Document this clearly in
+  the SDK API if/when it's packaged.
 
 ## Notes on Option 2
 
-Option 2 (atomic-spin redesign of `pause_all_vcpus`) is shelved
-with the data above. Reviving it would require either a
-compute-only workload where the vCPUs ack quickly (rare for
-real guests) or a different threading model. Neither is in
-scope. The instrumentation work that exposed the structural
-floor is left documented here so a future investigation does
-not repeat it.
+Option 2 (atomic-spin redesign of `pause_all_vcpus`) is shelved.
+Three variants were implemented and measured; the floor moved
+5–10 µs (within noise). Even with halted CPUs the per-step cost
+is ~105 µs dominated by cross-thread futex / BQL handover —
+structural Linux pthread + MTTCG behaviour, not addressable by
+patching `pause_all_vcpus`. The instrumentation work that
+established this is documented here so a future investigation
+does not repeat it.

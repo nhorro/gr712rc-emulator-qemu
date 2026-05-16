@@ -654,13 +654,17 @@ Until both blockers are addressed, the wrapper is wall-clock-paced
 and the documented 5 ms operating point is the recommended setting.
 For HIL applications that is the desired semantics anyway.
 
-The current proposed path for sub-millisecond stepping is
+Sub-millisecond stepping was investigated via two paths (Option 2:
+cheaper vm_start/vm_stop; Option 3: `-icount` + VIRTUAL deadline).
+Both were implemented and measured.
 [`docs/13-icount-step-pacing.md`](13-icount-step-pacing.md)
-(Option 3 in that doc). An earlier "cheaper vm_start/vm_stop"
-attempt (Option 2) was implemented and measured; the floor
-turned out to be structural cross-thread coordination cost not
-addressable by patching `pause_all_vcpus`. See the Option 2
-notes in docs/13 for the data.
+documents the results. Short version: the per-step floor of
+~120-220 µs is structural cross-thread coordination cost on
+Linux pthread + MTTCG and is **not** addressable by either
+approach. icount mode does work after a one-line SDK fix
+(documented in docs/13) and brings idle-time warping plus a
+foundation for deterministic replay, but does not deliver
+sub-1 ms pacing.
 
 ### `abort()` not intercepted
 
