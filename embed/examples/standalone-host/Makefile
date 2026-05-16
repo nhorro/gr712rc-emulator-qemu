@@ -11,11 +11,15 @@
 
 REPO       := $(abspath $(dir $(abspath $(lastword $(MAKEFILE_LIST))))../../..)
 EMBED_DIR  := $(REPO)/embed
+QEMU_SDK   := $(REPO)/qemu/include
 QEMU_BUILD := $(REPO)/qemu/build
 LIBQEMU    := $(QEMU_BUILD)/libqemu-sparc.so
 
+# QEMU_SDK is where libqemu.h lives — the .so's public header.
+# embed/embed_qemu.c #includes <libqemu.h>; main.c only needs
+# embed_qemu.h from the wrapper.
 CC      := gcc
-CFLAGS  := -Wall -Wextra -O2 -g -I$(EMBED_DIR)
+CFLAGS  := -Wall -Wextra -O2 -g -I$(EMBED_DIR) -I$(QEMU_SDK)
 LDFLAGS := -L$(QEMU_BUILD) -lqemu-sparc -Wl,-rpath,$(QEMU_BUILD)
 
 TARGET  := standalone-host

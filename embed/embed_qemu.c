@@ -1,23 +1,19 @@
 /*
- * embed_qemu — wrapper implementation. Lives outside the QEMU source
- * tree; links against libqemu-<target>.so at runtime for the symbols
- * it needs.
+ * embed_qemu — example wrapper around libqemu-<target>.so.
  *
- * Deliberately includes NO QEMU headers — instead we forward-declare
- * the minimal subset of QEMU's API that the wrapper uses, and the
- * enum values we depend on (RUN_STATE_PAUSED, QEMU_CLOCK_REALTIME).
- * Pinned to QEMU 8.2.2 (this fork). Canonical sources:
+ * Lives outside the QEMU source tree and links against the .so at
+ * runtime. Uses only:
+ *   - libqemu.h (the .so's public SDK header — types, enums, function
+ *     prototypes; ships with the .so)
+ *   - embed_qemu.h (this wrapper's own public API for hosts)
+ *   - the C standard library
  *
- *   QEMUTimer / QEMUClockType : qemu/include/qemu/timer.h
- *   RunState                  : qemu/build/qapi/qapi-types-run-state.h
- *   qemu_init / qemu_cleanup  : qemu/include/sysemu/sysemu.h
- *   vm_start / vm_stop        : qemu/include/sysemu/runstate.h
- *   main_loop_wait            : qemu/include/qemu/main-loop.h
+ * No QEMU internal headers. The wrapper exists to give hosts a
+ * 3-function API (init / step / cleanup) in exchange for managing
+ * the iothread mutex, deadline timer, and runstate check internally.
  *
- * If QEMU's API or enum ordering ever changes upstream, the values
- * below must be re-synced. The 3-function public API
- * (embed_qemu_init/step/cleanup) absorbs that drift so the host's
- * main.c never has to.
+ * Operating point: 1 ms fixed step under QEMU_CLOCK_REALTIME, no
+ * -icount. See ../NOTES.md for the granularity sweep that froze it.
  */
 
 #include <assert.h>
@@ -27,38 +23,9 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+#include <libqemu.h>
+
 #include "embed_qemu.h"
-
-/* ----- Forward-declared QEMU surface ---------------------------------- */
-
-typedef struct QEMUTimer QEMUTimer;
-typedef void QEMUTimerCB(void *opaque);
-
-#define QEMU_CLOCK_REALTIME 0   /* QEMUClockType enum, value 0 in QEMU 8.2.2 */
-#define RUN_STATE_PAUSED    4   /* RunState enum,      value 4 in QEMU 8.2.2 */
-
-extern void       qemu_init(int argc, char **argv);
-extern void       qemu_cleanup(int status);
-
-extern void       vm_start(void);
-extern void       vm_stop(int state);
-
-extern bool       main_loop_wait(bool nonblocking);
-extern bool       runstate_is_running(void);
-extern bool       runstate_check(int state);
-extern bool       qemu_mutex_iothread_locked(void);
-
-/*
- * timer_new_ns / timer_free are static inline in qemu/include/qemu/timer.h
- * and therefore have no ELF symbol. The fork's libqemu-<target>.so adds
- * paper-thin forwarders (embed_timer_new_ns / embed_timer_free) that we
- * link against here. timer_mod_ns is a real (non-inline) export.
- */
-extern QEMUTimer *embed_timer_new_ns(int type, QEMUTimerCB *cb, void *opaque);
-extern void       embed_timer_free(QEMUTimer *t);
-extern void       timer_mod_ns(QEMUTimer *t, int64_t expire_time);
-
-extern int64_t    qemu_clock_get_ns(int type);
 
 /* ----- Implementation ------------------------------------------------- */
 
