@@ -22,7 +22,7 @@
  *
  * Clock: today the step runs against QEMU_CLOCK_REALTIME, no
  * -icount. That is the only mode validated by the granularity
- * sweep in ../NOTES.md.
+ * sweep in ../docs/11-embedding-as-library.md.
  */
 
 #ifndef EMBED_QEMU_H

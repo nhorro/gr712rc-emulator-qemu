@@ -8,7 +8,8 @@
  * The gr712rc machine has 2 CPUs by default; if the guest is an SMP
  * RTEMS BSP (gr712rc_smp) the run exercises both cores.
  *
- * Expected per the operating point frozen in NOTES.md:
+ * Expected per the operating point frozen in
+ * ../../../docs/11-embedding-as-library.md:
  *   - single-core guest: wall ~5.5 s, slip ~+10% (p50 = 1.10x dt)
  *   - SMP guest:         wall ~5.9 s, slip ~+17% (p50 = 1.17x dt)
  *
@@ -74,7 +75,7 @@ int main(int argc, char **argv)
     printf("Steps:    %d x 1 ms = %.3f s sim time\n",
            N_STEPS, N_STEPS * DT_NS / 1e9);
     printf("Expected: wall ~5.5 s (single-core) or ~5.9 s (SMP guest),\n");
-    printf("          slip ~+10%% or ~+17%% (NOTES.md operating point)\n");
+    printf("          slip ~+10%% or ~+17%% (see docs/11-embedding-as-library.md)\n");
     printf("\n");
 
     int rc = embed_qemu_init(qargc, qargv);

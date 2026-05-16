@@ -13,7 +13,8 @@
  * the iothread mutex, deadline timer, and runstate check internally.
  *
  * Operating point: 1 ms fixed step under QEMU_CLOCK_REALTIME, no
- * -icount. See ../NOTES.md for the granularity sweep that froze it.
+ * -icount. See ../docs/11-embedding-as-library.md for the granularity
+ * sweep that froze it.
  */
 
 #include <assert.h>

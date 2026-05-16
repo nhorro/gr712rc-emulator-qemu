@@ -48,6 +48,12 @@ the [`qemu/`](https://github.com/nhorro/qemu-gr712rc-fork) submodule.
 - [Portable export](09-portable-export.md) — packaging the full
   emulator + UI as a `docker save` tarball for demoing on a fresh PC with
   no source.
+- [Embedding as library](11-embedding-as-library.md) — running the
+  emulator inside another program by linking `libqemu-sparc.so` and
+  driving QEMU step-by-step from the host's own `main()`. Covers the SDK
+  header `libqemu.h`, the example wrapper, the granularity sweep that
+  froze the operating point at 1 ms REALTIME, and the bundled timing
+  examples.
 
 ### Hardware reference
 

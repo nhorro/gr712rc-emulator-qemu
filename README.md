@@ -40,9 +40,32 @@ qemu-gr712rc/
 │   ├── 05-scriptable-stub/   Scriptable AMBA device (Lua + YAML)
 │   ├── 07-hello-gr740/       Single-core RTEMS hello world (gr740)
 │   └── 08-gr740-smp/         Quad-core SMP counter demo (gr740)
+├── embed/                    Consumer code for QEMU-as-library embedding
+│   ├── embed_qemu.{h,c}      Example wrapper over libqemu.h (init/step/cleanup)
+│   └── examples/
+│       ├── gr740/            Minimal 5 s × 1 ms timing demo on -M gr740
+│       └── gr712rc/          Minimal 5 s × 1 ms timing demo on -M gr712rc
 ├── qemu/                     QEMU 8.2.2 source tree (patched)
+│   ├── include/libqemu.h     Public SDK header for libqemu-sparc.so
+│   └── system/embed_api.c    Fork-only helpers exported by the .so
 └── toolchain/                Gaisler tools (RCC, BCC2, mkprom2 — not in git)
 ```
+
+## Embedding the emulator as a library
+
+The `embed/` subtree and the `qemu/include/libqemu.h` SDK header
+support running QEMU **inside another program** instead of as a
+separate `qemu-system-sparc` process. A host links against
+`libqemu-sparc.so` (produced by `make -C embed/examples/gr740
+qemu-lib`) and drives the emulator forward in fixed wall-clock
+slices via three functions (`embed_qemu_init` / `embed_qemu_step`
+/ `embed_qemu_cleanup`) or directly against the SDK header.
+
+See [docs/11-embedding-as-library.md](docs/11-embedding-as-library.md)
+for the operator reference: build setup, API description, the
+operating point (1 ms REALTIME) frozen by an empirical
+granularity sweep, the bundled timing examples, error handling
+discipline, and limitations.
 
 ## Prerequisites
 

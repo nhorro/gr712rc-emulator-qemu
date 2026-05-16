@@ -5,7 +5,8 @@
  * and prints a heartbeat every 1000 steps so you can SEE the
  * wall-clock keeping pace with simulated time, plus a final summary.
  *
- * Expected per the operating point frozen in NOTES.md:
+ * Expected per the operating point frozen in
+ * ../../../docs/11-embedding-as-library.md:
  *   wall ~5.5 s,  slip ~+10% (p50 = 1.10x dt single-core).
  *
  * Usage:
@@ -69,7 +70,7 @@ int main(int argc, char **argv)
     printf("Format:   %s\n", is_elf ? "ELF (-kernel)" : "raw (-bios)");
     printf("Steps:    %d x 1 ms = %.3f s sim time\n",
            N_STEPS, N_STEPS * DT_NS / 1e9);
-    printf("Expected: wall ~5.5 s, slip ~+10%% (NOTES.md operating point)\n");
+    printf("Expected: wall ~5.5 s, slip ~+10%% (see docs/11-embedding-as-library.md)\n");
     printf("\n");
 
     int rc = embed_qemu_init(qargc, qargv);

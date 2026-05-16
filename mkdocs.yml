@@ -100,5 +100,6 @@ nav:
       - Adapter API: 07-adapter-api.md
       - Running the service: 08-running-the-service.md
       - Portable export: 09-portable-export.md
+      - Embedding as library: 11-embedding-as-library.md
   - Hardware reference:
       - GR740 IP cores: 10-gr740-ipcores.md
