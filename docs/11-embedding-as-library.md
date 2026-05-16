@@ -654,10 +654,13 @@ Until both blockers are addressed, the wrapper is wall-clock-paced
 and the documented 5 ms operating point is the recommended setting.
 For HIL applications that is the desired semantics anyway.
 
-If a future iteration unblocks `-icount`, the per-step floor that
-[`docs/13-step-floor-redesign.md`](13-step-floor-redesign.md)
-addresses (vm_start / vm_stop coordination) still applies on top:
-the two improvements compound.
+The current proposed path for sub-millisecond stepping is
+[`docs/13-icount-step-pacing.md`](13-icount-step-pacing.md)
+(Option 3 in that doc). An earlier "cheaper vm_start/vm_stop"
+attempt (Option 2) was implemented and measured; the floor
+turned out to be structural cross-thread coordination cost not
+addressable by patching `pause_all_vcpus`. See the Option 2
+notes in docs/13 for the data.
 
 ### `abort()` not intercepted
 
