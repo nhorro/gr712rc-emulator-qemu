@@ -266,6 +266,36 @@ fundamentally unfit for some unforeseen reason.
   is a property of the external scheduler's requirements, not
   of the SDK.
 
+## Queued next steps (2026-05-16)
+
+The path forward decided at the end of the May 2026
+investigation is to ship Model B's plumbing speculatively
+(without waiting for a specific consumer), then investigate
+Blocker B for gr740 SMP parity. Order:
+
+1. **Ship Model B opt-in API** (~1-2 days, in
+   `embed/embed_qemu.{h,c}`):
+   - `embed_qemu_init_icount(argc, argv)` — adds
+     `-icount shift=10,sleep=on` to qargv internally and arms
+     the step timer on `QEMU_CLOCK_VIRTUAL`.
+   - `embed_qemu_step_locked(dt_ns)` — uses an absolute virtual
+     deadline `t_epoch_virt + step_count*dt_ns` so per-step
+     overshoot does not accumulate.
+   - New example under `embed/examples/gr712rc-lockstep/`.
+   - Update `docs/11-embedding-as-library.md` with the new mode.
+   - Document the gr740 SMP limitation explicitly (gated by
+     Blocker B).
+2. **Investigate Blocker B** (~5-10 days, uncertain) — only
+   after step 1 lands. Instrumentation of
+   `accel/tcg/tcg-accel-ops-rr.c` to identify the
+   `icount_percpu_budget` / `icount_handle_deadline` failure
+   mode with 4 active vCPUs.
+
+Step 1 is low-risk modest-scope and provides immediate
+building-block value for any future consumer needing
+lockstep sync. Step 2 is gating for full machine parity on
+the icount mode.
+
 ## Closing
 
 The two-scheduler architecture is workable. Per-step coupling
