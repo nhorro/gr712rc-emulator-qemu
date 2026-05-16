@@ -53,18 +53,18 @@ qemu/
 
 ## One-time setup
 
-The `.so` is not built by QEMU's default configure. You need
-`b_staticpic=true` so the static libraries that the `.so` pulls
-objects from are PIC-compatible:
+Just one command from this directory:
 
 ```bash
-cd qemu && mkdir -p build && cd build
-../configure --target-list=sparc-softmmu
-./pyvenv/bin/meson configure -Db_staticpic=true
-ninja libqemu-sparc.so
+make qemu-lib-setup
 ```
 
-Subsequent rebuilds: `ninja libqemu-sparc.so` from `qemu/build/`.
+That target configures `qemu/build` (if needed), enables
+`b_staticpic=true` (required so the static libs the `.so` pulls
+objects from are PIC-compatible), and runs `ninja libqemu-sparc.so`.
+Idempotent — re-running it is safe.
+
+Subsequent fast rebuilds of just the library: `make qemu-lib`.
 
 ## Build the host
 
@@ -163,11 +163,39 @@ submodule's `meson.build` produces only the `.so` (plus the
 distinction between "QEMU has an example that drives itself" and
 "a third-party program embeds QEMU".
 
-## Caveats
+## Error handling
 
-- The `.so` exports a very wide symbol surface (~all of QEMU). A
-  production embedder would tighten this with `-fvisibility=hidden`
-  + an explicit export list. Not done here.
+`embed_qemu_init()` intercepts `exit()` calls from inside QEMU
+(common via `&error_fatal` paths — bad kernel path, unknown
+machine, missing dependency). Instead of taking the host down with
+QEMU, `embed_qemu_init()` returns a *positive* code (the value QEMU
+tried to pass to `exit()`).
+
+```c
+int rc = embed_qemu_init(qargc, qargv);
+if (rc != 0) {
+    fprintf(stderr, "QEMU init failed: rc=%d\n", rc);
+    return rc;   /* don't reuse the lib — see below */
+}
+```
+
+Mechanism: `embed_qemu.c` defines its own `exit()`. The dynamic
+linker prefers the executable's definition over libc's for all
+calls made by `libqemu-sparc.so`. When inside `embed_qemu_init()`,
+our `exit()` longjmps back to a `setjmp` at the start of init().
+Outside of init(), it forwards to `_exit()` so normal host
+termination still works.
+
+**Critical caveat**: after a non-zero return, QEMU's internal
+state is corrupt (the longjmp left locks, fds, and threads
+half-initialized). The host **MUST NOT** call any other
+`embed_qemu_*` function. Terminate cleanly and start fresh if a
+retry is needed. The included test demonstrates that a second
+`embed_qemu_init()` call after a failure crashes with
+`ran out of space in drive_config_groups`.
+
+## Other caveats
+
 - `embed_qemu.c`'s forward declarations encode the values of
   `RUN_STATE_PAUSED` and `QEMU_CLOCK_REALTIME` from QEMU 8.2.2.
   If those change upstream, update `embed_qemu.c` to match.
@@ -175,7 +203,9 @@ distinction between "QEMU has an example that drives itself" and
   dependencies (glib, pixman, etc. — see `ldd standalone-host`).
   These are loaded into the host process whether or not it uses
   them directly.
-- QEMU's `error_fatal` paths still call `exit()`; embedding
-  arbitrarily-bad inputs can still take the host process down.
-  Hardening that is "deuda" #2 in `NOTES.md` "Open technical
-  issues".
+- The `.so` exports exactly 13 symbols (plus a version tag), pinned
+  by `qemu/system/embed_api.map`. Adding new functionality requires
+  appending to that linker version script.
+- `abort()` paths (used by some QEMU error_abort sites) are NOT
+  intercepted — only `exit()` is. A small number of QEMU errors
+  will still kill the host.

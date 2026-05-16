@@ -21,9 +21,11 @@
  */
 
 #include <assert.h>
+#include <setjmp.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 #include "embed_qemu.h"
 
@@ -62,6 +64,36 @@ extern int64_t    qemu_clock_get_ns(int type);
 
 static QEMUTimer *step_timer;
 
+/*
+ * exit() interception. QEMU has hundreds of error paths that route
+ * through &error_fatal, which ultimately calls exit(1). For an
+ * embedder that breaks the host process. We override exit() in this
+ * translation unit; because embed_qemu.c is linked into the host
+ * executable, the dynamic linker prefers our definition over libc's
+ * for all calls made by libqemu-<target>.so.
+ *
+ * Behaviour:
+ *   - When embed_qemu_init() has armed the trap (via setjmp), an
+ *     exit() call inside QEMU longjmps back so init() can return
+ *     the exit code.
+ *   - Outside init(), our exit() forwards to _exit() so normal
+ *     host shutdown paths still terminate the process. We deliberately
+ *     skip atexit handlers to avoid re-entering QEMU code after a
+ *     longjmp left it in an indeterminate state.
+ */
+static jmp_buf init_failure_jmp;
+static int     init_in_progress;
+
+void exit(int code)
+{
+    if (init_in_progress) {
+        /* normalize zero codes to 1 so the caller distinguishes
+         * success (return 0) from "QEMU asked to exit cleanly with 0". */
+        longjmp(init_failure_jmp, code == 0 ? 1 : code);
+    }
+    _exit(code);
+}
+
 static void step_deadline_cb(void *opaque)
 {
     (void)opaque;
@@ -70,7 +102,16 @@ static void step_deadline_cb(void *opaque)
 
 int embed_qemu_init(int argc, char **argv)
 {
+    int trap = setjmp(init_failure_jmp);
+    if (trap != 0) {
+        /* came back via longjmp from exit() inside QEMU */
+        init_in_progress = 0;
+        return trap;
+    }
+    init_in_progress = 1;
     qemu_init(argc, argv);
+    init_in_progress = 0;
+
     assert(qemu_mutex_iothread_locked());
     step_timer = embed_timer_new_ns(QEMU_CLOCK_REALTIME, step_deadline_cb, NULL);
     return 0;

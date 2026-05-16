@@ -37,7 +37,22 @@ typedef struct EmbedStepStats {
     int     guest_left_running_state;
 } EmbedStepStats;
 
+/*
+ * Bring up an in-process QEMU machine.
+ *
+ * Returns 0 on success. Returns a *positive* code on failure: that
+ * code is the exit value QEMU attempted to pass to exit() (typically
+ * 1) when an &error_fatal path tripped during initialization
+ * (e.g. bad kernel path, unknown machine, missing dependency).
+ *
+ * IMPORTANT: after a non-zero return, QEMU's internal state is
+ * inconsistent (the longjmp out of qemu_init() leaves locks, fds,
+ * and threads in an indeterminate state). The host MUST NOT call
+ * any other embed_qemu_* function in that process — terminate
+ * cleanly and start fresh if a retry is needed.
+ */
 int  embed_qemu_init(int argc, char **argv);
+
 int  embed_qemu_step(int64_t dt_ns, EmbedStepStats *out);
 void embed_qemu_cleanup(void);
 

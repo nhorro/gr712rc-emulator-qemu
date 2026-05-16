@@ -27,9 +27,30 @@ N_STEPS ?= 2000
 GR740_KERNEL   := $(REPO)/apps/07-hello-gr740/hello.exe
 GR712RC_KERNEL := $(REPO)/apps/02-dual-core-timer/dual_core_timer.exe
 
-.PHONY: all run-gr740 run-gr712rc check-lib clean
+.PHONY: all run-gr740 run-gr712rc check-lib qemu-lib qemu-lib-setup clean
 
 all: $(TARGET)
+
+# One-time configuration of the QEMU build tree for embedding. Runs
+# configure (if needed), enables b_staticpic (required so the static
+# libraries the .so pulls objects from are PIC-compatible), and
+# builds libqemu-sparc.so. Idempotent: safe to re-run.
+qemu-lib-setup:
+	@if [ ! -d $(REPO)/qemu/build ]; then \
+		echo ">>> Configuring qemu/build for sparc-softmmu"; \
+		cd $(REPO)/qemu && mkdir build && cd build \
+		    && ../configure --target-list=sparc-softmmu; \
+	fi
+	@echo ">>> Enabling b_staticpic for shared-library build"
+	@$(REPO)/qemu/build/pyvenv/bin/meson configure \
+	    $(REPO)/qemu/build -Db_staticpic=true 2>/dev/null || true
+	@echo ">>> Building libqemu-sparc.so"
+	@cd $(REPO)/qemu/build && ninja libqemu-sparc.so
+
+# Quick incremental rebuild of just the .so (assumes qemu/build is
+# already configured).
+qemu-lib:
+	@cd $(REPO)/qemu/build && ninja libqemu-sparc.so
 
 main.o: main.c $(EMBED_DIR)/embed_qemu.h
 	$(CC) $(CFLAGS) -c main.c -o main.o

@@ -78,7 +78,13 @@ int main(int argc, char **argv)
     };
     int qargc = (int)(sizeof(qargv) / sizeof(qargv[0])) - 1;
 
-    embed_qemu_init(qargc, qargv);
+    int rc = embed_qemu_init(qargc, qargv);
+    if (rc != 0) {
+        fprintf(stderr,
+            "[standalone-host] embed_qemu_init failed: code=%d (QEMU tried to exit)\n",
+            rc);
+        return rc;
+    }
     fprintf(stderr,
         "[standalone-host] embed_qemu_init OK; starting step loop\n");
 
