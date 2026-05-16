@@ -592,24 +592,72 @@ pattern.
 
 ## Limitations
 
-### Determinism
+### Determinism / icount
 
-Bit-exact reproducibility requires `QEMU_CLOCK_VIRTUAL` + `-icount`,
-currently blocked by two issues in the gr712rc / gr740 models (not
-in the embedding wrapper):
+Bit-exact reproducibility and decoupled virtual time require
+`-icount` (optionally with `sleep=on`). Earlier revisions of this
+doc claimed the path was blocked by an MPSTATUS CPU-release
+deadlock during BSP init; an audit (May 2026) found that
+diagnosis is incorrect. SMP startup completes successfully under
+`-icount`. The real picture, with empirical results, is below.
 
-1. **SMP startup under `-icount`**: the IRQMP MPSTATUS CPU-release
-   handshake deadlocks during BSP init under
-   instruction-quantized time. CPU0 / CPU1 ordering needs
-   auditing.
-2. **Halted vCPUs under `-icount`**: when guests reach `wfi` or
-   call `exit()`, the virtual clock stops advancing and a
-   step-loop timer at `now + dt` is unreachable. Needs either
-   `sleep=on` semantics (warp to next deadline) or an explicit
-   "advance virtual time" helper.
+**What works under `-icount` today:**
 
-Until those are addressed, the library is wall-clock-paced. For
-HIL applications that is the desired semantics anyway.
+- **gr712rc SMP** boots and runs cleanly under
+  `-icount shift=10,sleep=on` via plain `qemu-system-sparc`
+  (verified with `apps/02-dual-core-timer/dual_core_timer.exe`).
+  Both LEON3FT cores execute and the clock tick fires.
+- `shift=8` and `shift=10` are the empirically usable fixed
+  values for gr712rc. `shift=auto` hangs (the adaptive
+  algorithm starts at `shift=3` and the initial deadline
+  computation puts the warp timer effectively unreachable in
+  wall-clock terms; even after the auto loop climbs to
+  `shift=10`, `qemu_icount_bias` has accumulated state that
+  doesn't recover).
+- **Single-core guests** on either machine work under all
+  tested shifts (0, 4, 8, 10, auto).
+
+**What's still blocked:**
+
+1. **gr740 SMP fails under `-icount` at every shift**
+   (0, 4, 8, 10, 12, auto), regardless of `sleep=on`. The
+   3-cores-halted-at-reset configuration (e.g.
+   `apps/07-hello-gr740/hello.exe`, where the BSP doesn't
+   release CPU1-3) works at some shifts. Suspected cause:
+   the per-vCPU icount budget / deadline-handling interaction
+   in `accel/tcg/tcg-accel-ops-rr.c` when all four vCPUs make
+   active progress under round-robin TCG. Requires deeper
+   instrumentation to confirm.
+
+2. **VIRTUAL-clock-paced stepping in the embed wrapper** does
+   not wake the host's `main_loop_wait`. The intended pattern
+   is `embed_timer_new_ns(QEMU_CLOCK_VIRTUAL, ...)` armed at
+   `qemu_clock_get_ns(VIRTUAL) + dt`. The timer callback DOES
+   fire (in the `rr_cpu_thread_fn` context, via
+   `icount_handle_deadline`) and `vm_stop` does run, but no
+   `qemu_notify_event()` propagates back to the host thread's
+   `ppoll`, so the step loop hangs indefinitely. Until this
+   wake-up is plumbed, the host cannot use VIRTUAL deadlines
+   and the wrapper falls back to wall-clock pacing.
+
+**What `-icount` alone does not buy:**
+
+Adding `-icount shift=10,sleep=on` to the qargv while keeping
+the REALTIME-clock step deadline gives slip identical to the
+baseline — measured +12.2% vs +12.1% at dt=1 ms on gr712rc SMP.
+The step-loop floor (`vm_start` / `main_loop_wait` / `vm_stop`
+coordination across threads) is independent of icount mode. The
+icount path only pays off if the deadline can be VIRTUAL **and**
+the wake-up issue above is solved.
+
+Until both blockers are addressed, the wrapper is wall-clock-paced
+and the documented 5 ms operating point is the recommended setting.
+For HIL applications that is the desired semantics anyway.
+
+If a future iteration unblocks `-icount`, the per-step floor that
+[`docs/13-step-floor-redesign.md`](13-step-floor-redesign.md)
+addresses (vm_start / vm_stop coordination) still applies on top:
+the two improvements compound.
 
 ### `abort()` not intercepted
 
