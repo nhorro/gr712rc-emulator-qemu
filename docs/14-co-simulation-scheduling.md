@@ -232,8 +232,8 @@ fundamentally unfit for some unforeseen reason.
 | External scheduler shape                            | Timing requirement   | Recommended model | Effort beyond current SDK |
 | ---                                                 | ---                  | ---               | ---                       |
 | Wall-clock-driven, ±10 % timing OK                  | Real-time            | **A** (current)   | Zero                      |
-| Wall-clock-driven, strict timing                    | Hard real-time, dt ≥ 5 ms | **C**         | 1-2 d (Model B work + host rate limiter pattern documented) |
-| Virtual-time, as-fast-as-possible                   | Lockstep, no drift   | **B**             | 1-2 d (icount opt-in API) |
+| Wall-clock-driven, strict timing                    | Hard real-time, dt ≥ 5 ms | **A** + external rate limiter | Trivial (rate-limiter loop in host) |
+| Virtual-time, as-fast-as-possible                   | Lockstep, no drift   | **B** — *not viable for SMP guests* (see below); **A** if SMP acceptable | High — would require upstream QEMU fix for icount+rr+SMP |
 | Virtual-time, sub-ms sampling                       | Lockstep, sub-ms     | **D**             | 3-5 d (loop pattern + examples) |
 | Mixed / unclear                                     | Mixed                | Start at **A**, escalate when a use case forces it | — |
 
@@ -244,9 +244,9 @@ fundamentally unfit for some unforeseen reason.
 | REALTIME `embed_qemu_step(dt)` (Model A)             | Shipped, current default                |
 | `qemu_notify_event` exported for cross-thread wake   | Shipped (1d32a74, 16f8dc3)              |
 | Flag-based step deadline callback                    | Shipped (16f8dc3)                       |
-| icount mode opt-in API (Models B/C)                  | **Not shipped** — wrapper changes only, 1-2 days |
-| Absolute virtual deadlines in step API               | **Not shipped** — required for Model B  |
-| gr740 SMP under `-icount` (Blocker B)                | **Not investigated** — needed for parity if Model B/C is offered |
+| icount mode opt-in API (Models B/C)                  | **Tried, reverted** (May 2026) — see "Models B and C — tried and abandoned" below |
+| Absolute virtual deadlines in step API               | **Tried, reverted** — code preserved in git history at `b8899a4` |
+| gr740 SMP under `-icount` (Blocker B)                | **Diagnosed, structural** — PIL-spin starvation under rr+icount, no viable fix at this layer |
 | Host-side peripheral SDK (Model D substrate)         | Shipped (`docs/12-host-side-peripherals.md`) |
 | Documented "sampling loop" host pattern (Model D)    | **Not shipped** — would need example + doc |
 | Determinism via virtual-time-paced peripherals       | **Not shipped** — design pass required, depends on Model B |
@@ -266,35 +266,69 @@ fundamentally unfit for some unforeseen reason.
   is a property of the external scheduler's requirements, not
   of the SDK.
 
-## Queued next steps (2026-05-16)
+## Models B and C — tried and abandoned (May 2026)
 
-The path forward decided at the end of the May 2026
-investigation is to ship Model B's plumbing speculatively
-(without waiting for a specific consumer), then investigate
-Blocker B for gr740 SMP parity. Order:
+The plan one might infer from the model catalogue above —
+*ship Model B's plumbing, then investigate Blocker B for SMP
+parity* — was attempted in a single investigation session and
+reverted in the same session. The catalogue is left intact as
+**design reference**, but the SDK currently ships **only Model
+A**. Reintroducing Model B is not blocked by missing code; it
+is blocked by a structural interaction between `-icount`,
+round-robin TCG, and RTEMS SMP critical sections that none of
+the experiments could route around.
 
-1. **Ship Model B opt-in API** (~1-2 days, in
-   `embed/embed_qemu.{h,c}`):
-   - `embed_qemu_init_icount(argc, argv)` — adds
-     `-icount shift=10,sleep=on` to qargv internally and arms
-     the step timer on `QEMU_CLOCK_VIRTUAL`.
-   - `embed_qemu_step_locked(dt_ns)` — uses an absolute virtual
-     deadline `t_epoch_virt + step_count*dt_ns` so per-step
-     overshoot does not accumulate.
-   - New example under `embed/examples/gr712rc-lockstep/`.
-   - Update `docs/11-embedding-as-library.md` with the new mode.
-   - Document the gr740 SMP limitation explicitly (gated by
-     Blocker B).
-2. **Investigate Blocker B** (~5-10 days, uncertain) — only
-   after step 1 lands. Instrumentation of
-   `accel/tcg/tcg-accel-ops-rr.c` to identify the
-   `icount_percpu_budget` / `icount_handle_deadline` failure
-   mode with 4 active vCPUs.
+**What was shipped, then reverted:**
 
-Step 1 is low-risk modest-scope and provides immediate
-building-block value for any future consumer needing
-lockstep sync. Step 2 is gating for full machine parity on
-the icount mode.
+- Commit `b8899a4` — `embed_qemu_init_icount` +
+  `embed_qemu_step_locked` API, two lockstep examples
+  (gr712rc, gr740), and a Model B section in docs/11. Reverted
+  by `3041aee`.
+- Commit `b8e8008` — diagnosis of Blocker B with empirical
+  data: 228,997 software traps and 0 external interrupts in
+  3 seconds wall on gr740 SMP under `-icount auto,sleep=on`.
+  Reverted by `4cfec03`.
+
+Both commits remain in git history; `git show b8899a4` and
+`git show b8e8008` recover the full implementation and
+diagnosis if reintroducing the work is ever justified.
+
+**Why it was abandoned**: this project's primary apps are SMP
+RTEMS (`apps/02-dual-core-timer`, `apps/08-gr740-smp`). Under
+`-icount` + rr-mode TCG, the RTEMS SMP ticket-lock pattern
+(`_SMP_lock_ISR_disable_and_acquire`, paired `ta 0x9` /
+`ta 0xA` traps) keeps `PSR.PIL=15` for >99% of execution.
+External IRQs (timer ticks, IPIs) are masked during that
+window; the brief PIL-low windows between `rett` and the next
+`ta 0x9` are too short for the rr scheduler to land an IRQ
+before the next critical section starts. Result: gr740 SMP
+hangs (0 IRQs delivered in 3 s), gr712rc SMP runs ~10× slower
+than Model A (≈10 lines of UART vs ≈100+ in the same wall
+budget). Both empirical, both reproducible. Without an
+external scheduler that can work with single-core guests only
+— and the project has none today — Model B has near-zero
+value here.
+
+**Refuted hypotheses** (kept here as breadcrumbs so future
+readers do not re-investigate the same dead ends):
+
+| Suspected cause                                  | Verdict |
+| ---                                              | --- |
+| 4 vCPUs saturate `icount_percpu_budget`          | Refuted — `-smp 2` also hangs |
+| `qemu_cpu_kick` fails under rr-mode              | Refuted — `info cpus` confirms all CPUs running |
+| `ldstub` / `casa` atomicity broken under rr      | Refuted — `gen_ldstub_asi` uses `tcg_gen_atomic_xchg_tl` |
+| IPI delivery is broken                            | Refuted (and broader) — no external IRQ of any kind fires |
+| Higher icount shift would unblock                | Refuted — full 0–10 sweep + `align=on` + `sleep=off` all hang |
+
+**Re-attempting** Model B is only justified if one of these
+two changes:
+
+1. A concrete consumer needs lockstep co-simulation AND can
+   use single-core guests exclusively. Then re-cherry-pick
+   `b8899a4` minus the SMP examples.
+2. An upstream QEMU change addresses the rr+icount+PIL-spin
+   interaction. Then re-attempt with the upstream fix and
+   re-test the SMP apps as the acceptance criterion.
 
 ## Closing
 

@@ -186,6 +186,23 @@ a determinism or "skip-idle" use case for gr740 SMP appears.
 
 ## Future work (only if motivated by a concrete use case)
 
+> **Update (May 2026)**: items 1 and 2 below were attempted in
+> a single investigation session and reverted. The icount-paced
+> SDK API (`embed_qemu_init_icount` / `embed_qemu_step_locked`)
+> shipped in commit `b8899a4` and was removed in `3041aee`
+> after the Blocker B investigation found the root cause to be
+> a structural interaction between rr-mode TCG, `-icount`
+> virtual-time accounting, and RTEMS SMP `PSR.PIL=15` critical
+> sections — not the per-vCPU icount budget issue this doc
+> originally suspected. The empirical evidence (228k software
+> traps and 0 external interrupts in a 3 s gr740 SMP hang
+> sample) is preserved in commit `b8e8008`. The current
+> consolidated view lives in
+> [`docs/14-co-simulation-scheduling.md`](14-co-simulation-scheduling.md)
+> § "Models B and C — tried and abandoned". The list below is
+> retained as a record of what was attempted, not as a
+> recommended plan.
+
 If a consumer of the SDK appears that needs either deterministic
 replay or "skip idle time" semantics, the path forward is:
 

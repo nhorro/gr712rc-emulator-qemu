@@ -535,9 +535,12 @@ Revisit the operating-point decision if any of these occur:
   structural fix is then to redesign the step API so QEMU runs
   continuously instead of `vm_start`/`vm_stop` per tick (the
   per-step floor would drop from ~100-250 µs to <10 µs).
-- Determinism becomes a hard requirement → switch to
-  `QEMU_CLOCK_VIRTUAL` + `-icount`, blocked today by two issues in
-  the gr712rc / gr740 models (see [Limitations](#limitations)).
+- Determinism becomes a hard requirement → an icount-paced
+  step API was prototyped and reverted (see
+  [Determinism / icount](#determinism--icount) for the
+  empirical reason). Reintroducing it requires a consumer
+  that can work with single-core guests only, or an upstream
+  QEMU fix for the rr+icount+PIL-spin interaction.
 - Deployment moves to a preempt-RT kernel with CPU isolation →
   re-run the sweep; the per-step floor likely drops and finer
   `dt` becomes viable.
@@ -595,76 +598,53 @@ pattern.
 ### Determinism / icount
 
 Bit-exact reproducibility and decoupled virtual time require
-`-icount` (optionally with `sleep=on`). Earlier revisions of this
-doc claimed the path was blocked by an MPSTATUS CPU-release
-deadlock during BSP init; an audit (May 2026) found that
-diagnosis is incorrect. SMP startup completes successfully under
-`-icount`. The real picture, with empirical results, is below.
+`-icount`. The SDK does **not** expose an icount-based step API;
+the only shipped operating mode is REALTIME pacing via
+`embed_qemu_step(dt)`. This section explains why.
 
-**What works under `-icount` today:**
+**What works under `-icount`** (CLI side, plain `qemu-system-sparc`):
 
-- **gr712rc SMP** boots and runs cleanly under
-  `-icount shift=10,sleep=on` via plain `qemu-system-sparc`
-  (verified with `apps/02-dual-core-timer/dual_core_timer.exe`).
-  Both LEON3FT cores execute and the clock tick fires.
-- `shift=8` and `shift=10` are the empirically usable fixed
-  values for gr712rc. `shift=auto` hangs (the adaptive
-  algorithm starts at `shift=3` and the initial deadline
-  computation puts the warp timer effectively unreachable in
-  wall-clock terms; even after the auto loop climbs to
-  `shift=10`, `qemu_icount_bias` has accumulated state that
-  doesn't recover).
 - **Single-core guests** on either machine work under all
-  tested shifts (0, 4, 8, 10, auto).
+  tested shifts (0, 4, 8, 10) plus `auto`.
+- **gr712rc SMP** boots and runs at the CLI under
+  `-icount shift=10,sleep=on` (verified with
+  `apps/02-dual-core-timer/dual_core_timer.exe`) but runs in a
+  **degraded mode**: the timer-tick IRQ fires infrequently
+  because virtual time advances slowly during RTEMS's SMP
+  ticket-lock spin (≈10 lines of UART over 5 s sim vs ≈100+
+  under non-icount).
 
-**What's still blocked:**
+**What does not work under `-icount`**:
 
-1. **gr740 SMP fails under `-icount` at every shift**
-   (0, 4, 8, 10, 12, auto), regardless of `sleep=on`. The
-   3-cores-halted-at-reset configuration (e.g.
-   `apps/07-hello-gr740/hello.exe`, where the BSP doesn't
-   release CPU1-3) works at some shifts. Suspected cause:
-   the per-vCPU icount budget / deadline-handling interaction
-   in `accel/tcg/tcg-accel-ops-rr.c` when all four vCPUs make
-   active progress under round-robin TCG. Requires deeper
-   instrumentation to confirm.
+- **gr740 SMP** hangs at every valid shift (0–10), `auto`,
+  with or without `sleep=on`, with or without `align=on`.
+  Diagnosed May 2026: under rr-mode TCG, the RTEMS SMP boot
+  keeps `PSR.PIL=15` for >99% of execution (tight `ta 0x9` /
+  `ta 0xA` software-trap spin), so IRQs are masked almost
+  always. A 3-second trap log on a representative hang
+  captured **228,997 software traps and 0 external
+  interrupts**. The IRQMP correctly raises the IPI line; the
+  CPU never takes it because of the PIL spin. This interaction
+  is structural across three layers (RTEMS critical-section
+  pattern + SPARC PIL semantics + rr+icount scheduling) and
+  was not addressable by any single-side change attempted.
 
-2. **VIRTUAL-clock-paced stepping in the embed wrapper** does
-   not wake the host's `main_loop_wait`. The intended pattern
-   is `embed_timer_new_ns(QEMU_CLOCK_VIRTUAL, ...)` armed at
-   `qemu_clock_get_ns(VIRTUAL) + dt`. The timer callback DOES
-   fire (in the `rr_cpu_thread_fn` context, via
-   `icount_handle_deadline`) and `vm_stop` does run, but no
-   `qemu_notify_event()` propagates back to the host thread's
-   `ppoll`, so the step loop hangs indefinitely. Until this
-   wake-up is plumbed, the host cannot use VIRTUAL deadlines
-   and the wrapper falls back to wall-clock pacing.
+**Why the SDK does not expose an icount-based API**: the
+project's primary apps are SMP RTEMS. An icount-paced step
+function (`embed_qemu_init_icount` + `embed_qemu_step_locked`)
+was prototyped and shipped in commit `b8899a4`, then reverted
+in `3041aee` because gr740 SMP hangs and gr712rc SMP runs
+degraded — covering only single-core guests and demos, not the
+real workloads this project targets. The full implementation
+and the empirical diagnosis are preserved in git history at
+`b8899a4` and `b8e8008` if a future consumer with single-core
+constraints justifies revisiting.
 
-**What `-icount` alone does not buy:**
-
-Adding `-icount shift=10,sleep=on` to the qargv while keeping
-the REALTIME-clock step deadline gives slip identical to the
-baseline — measured +12.2% vs +12.1% at dt=1 ms on gr712rc SMP.
-The step-loop floor (`vm_start` / `main_loop_wait` / `vm_stop`
-coordination across threads) is independent of icount mode. The
-icount path only pays off if the deadline can be VIRTUAL **and**
-the wake-up issue above is solved.
-
-Until both blockers are addressed, the wrapper is wall-clock-paced
-and the documented 5 ms operating point is the recommended setting.
-For HIL applications that is the desired semantics anyway.
-
-Sub-millisecond stepping was investigated via two paths (Option 2:
-cheaper vm_start/vm_stop; Option 3: `-icount` + VIRTUAL deadline).
-Both were implemented and measured.
-[`docs/13-icount-step-pacing.md`](13-icount-step-pacing.md)
-documents the results. Short version: the per-step floor of
-~120-220 µs is structural cross-thread coordination cost on
-Linux pthread + MTTCG and is **not** addressable by either
-approach. icount mode does work after a one-line SDK fix
-(documented in docs/13) and brings idle-time warping plus a
-foundation for deterministic replay, but does not deliver
-sub-1 ms pacing.
+`docs/13-icount-step-pacing.md` documents the earlier
+investigation of sub-millisecond stepping under `-icount` +
+VIRTUAL deadlines. Short version: the per-step floor of
+~120–220 µs is structural cross-thread coordination cost on
+Linux pthread + MTTCG and is not addressable by icount.
 
 ### `abort()` not intercepted
 
