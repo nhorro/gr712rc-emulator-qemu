@@ -1,17 +1,19 @@
 /*
  * timing-gr712rc — minimal embed example.
  *
- * Runs 5000 steps of 1 ms (= 5 seconds of guest time) on -M gr712rc
- * and prints a heartbeat every 1000 steps so you can SEE the
+ * Runs 1000 steps of 5 ms (= 5 seconds of guest time) on -M gr712rc
+ * and prints a heartbeat every 200 steps so you can SEE the
  * wall-clock keeping pace with simulated time, plus a final summary.
  *
  * The gr712rc machine has 2 CPUs by default; if the guest is an SMP
  * RTEMS BSP (gr712rc_smp) the run exercises both cores.
  *
- * Expected per the operating point frozen in
- * ../../../docs/11-embedding-as-library.md:
- *   - single-core guest: wall ~5.5 s, slip ~+10% (p50 = 1.10x dt)
- *   - SMP guest:         wall ~5.9 s, slip ~+17% (p50 = 1.17x dt)
+ * Operating point per ../../../docs/11-embedding-as-library.md
+ * (5 ms dt under QEMU_CLOCK_REALTIME):
+ *   - SMP guest, 2 cores: slip ~+3%
+ * If your use case needs sub-5 ms host-side reaction time, drop dt
+ * to 2 ms (slip ~+7%) or 1 ms (slip ~+12%). See the dt-sweep table
+ * in the doc for the full tradeoff.
  *
  * Usage:
  *   timing-gr712rc <binary>
@@ -27,8 +29,9 @@
 
 #include "embed_qemu.h"
 
-#define N_STEPS 5000
-#define DT_NS   1000000LL  /* 1 ms */
+#define N_STEPS         1000
+#define DT_NS           5000000LL  /* 5 ms */
+#define HEARTBEAT_EVERY 200        /* 5 heartbeats over the run */
 
 static int file_is_elf(const char *path)
 {
@@ -72,10 +75,10 @@ int main(int argc, char **argv)
     printf("=== timing-gr712rc ===\n");
     printf("Binary:   %s\n", abs_binary);
     printf("Format:   %s\n", is_elf ? "ELF (-kernel)" : "raw (-bios)");
-    printf("Steps:    %d x 1 ms = %.3f s sim time\n",
-           N_STEPS, N_STEPS * DT_NS / 1e9);
-    printf("Expected: wall ~5.5 s (single-core) or ~5.9 s (SMP guest),\n");
-    printf("          slip ~+10%% or ~+17%% (see docs/11-embedding-as-library.md)\n");
+    printf("Steps:    %d x %lld ms = %.3f s sim time\n",
+           N_STEPS, (long long)(DT_NS / 1000000), N_STEPS * DT_NS / 1e9);
+    printf("Expected: SMP guest, 2 cores — slip ~+3%%\n");
+    printf("          (see docs/11-embedding-as-library.md for dt-sweep)\n");
     printf("\n");
 
     int rc = embed_qemu_init(qargc, qargv);
@@ -90,7 +93,7 @@ int main(int argc, char **argv)
         embed_qemu_step(DT_NS, &st);
         total_wall += st.actual_wall_ns;
 
-        if (i % 1000 == 0) {
+        if (i % HEARTBEAT_EVERY == 0) {
             double sim_s  = (double)i * DT_NS / 1e9;
             double wall_s = total_wall / 1e9;
             printf("  step %4d / %d   sim=%.3f s   wall=%.3f s   slip=%+5.1f%%\n",

@@ -43,8 +43,8 @@ qemu-gr712rc/
 ├── embed/                    Consumer code for QEMU-as-library embedding
 │   ├── embed_qemu.{h,c}      Example wrapper over libqemu.h (init/step/cleanup)
 │   └── examples/
-│       ├── gr740/            Minimal 5 s × 1 ms timing demo on -M gr740
-│       └── gr712rc/          Minimal 5 s × 1 ms timing demo on -M gr712rc
+│       ├── gr740/            Minimal 5 s × 5 ms timing demo on -M gr740
+│       └── gr712rc/          Minimal 5 s × 5 ms timing demo on -M gr712rc
 ├── qemu/                     QEMU 8.2.2 source tree (patched)
 │   ├── include/libqemu.h     Public SDK header for libqemu-sparc.so
 │   └── system/embed_api.c    Fork-only helpers exported by the .so
@@ -63,9 +63,9 @@ slices via three functions (`embed_qemu_init` / `embed_qemu_step`
 
 See [docs/11-embedding-as-library.md](docs/11-embedding-as-library.md)
 for the operator reference: build setup, API description, the
-operating point (1 ms REALTIME) frozen by an empirical
-granularity sweep, the bundled timing examples, error handling
-discipline, and limitations.
+operating point (5 ms REALTIME) chosen from a multi-core dt-sweep,
+the bundled timing examples, error handling discipline, and
+limitations.
 
 ## Prerequisites
 

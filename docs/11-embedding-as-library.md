@@ -55,9 +55,9 @@ make -C embed/examples/gr740 run
 make -C embed/examples/gr712rc run
 ```
 
-Each example runs 5000 steps of 1 ms (= 5 seconds of guest time),
-prints a per-second heartbeat showing the wall clock keeping pace,
-and tails the guest UART output. See [The bundled examples](#the-bundled-examples)
+Each example runs 1000 steps of 5 ms (= 5 seconds of guest time),
+prints a heartbeat every second showing the wall clock keeping
+pace, and tails the guest UART output. See [The bundled examples](#the-bundled-examples)
 below for what to expect.
 
 ## What the SDK distributes
@@ -235,8 +235,8 @@ int main(int argc, char **argv) {
     qemu_init(qargc, qargv);
     step_timer = embed_timer_new_ns(QEMU_CLOCK_REALTIME, deadline_cb, NULL);
 
-    int64_t dt_ns = 1000 * 1000;  /* 1 ms */
-    for (int i = 0; i < 5000; i++) {
+    int64_t dt_ns = 5 * 1000 * 1000;  /* 5 ms (recommended operating point) */
+    for (int i = 0; i < 1000; i++) {
         int64_t t0 = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         timer_mod_ns(step_timer, t0 + dt_ns);
         vm_start();
@@ -303,8 +303,8 @@ wrapper for C++) is expected to write its own wrapper against
 ## The bundled examples
 
 Two minimal example programs live under `embed/examples/`. Each
-takes exactly one argument — the guest binary — and runs 5000
-steps of 1 ms (= 5 seconds of guest time) so that you can SEE the
+takes exactly one argument — the guest binary — and runs 1000
+steps of 5 ms (= 5 seconds of guest time) so that you can SEE the
 wall-clock keeping pace with simulated time.
 
 | Path                          | Machine     | Default guest                              |
@@ -335,18 +335,18 @@ make -C embed/examples/gr740 run BIN=/abs/path/to/something.exe
 === timing-gr740 ===
 Binary:   .../apps/07-hello-gr740/hello.exe
 Format:   ELF (-kernel)
-Steps:    5000 x 1 ms = 5.000 s sim time
-Expected: wall ~5.5 s, slip ~+10% (operating point)
+Steps:    1000 x 5 ms = 5.000 s sim time
+Expected: SMP guest, 4 cores — slip ~+5%
 
-  step 1000 / 5000   sim=1.000 s   wall=1.130 s   slip=+13.0%
-  step 2000 / 5000   sim=2.000 s   wall=2.255 s   slip=+12.8%
-  step 3000 / 5000   sim=3.000 s   wall=3.375 s   slip=+12.5%
-  step 4000 / 5000   sim=4.000 s   wall=4.487 s   slip=+12.2%
-  step 5000 / 5000   sim=5.000 s   wall=5.617 s   slip=+12.3%
+  step  200 / 1000   sim=1.000 s   wall=1.052 s   slip=+5.2%
+  step  400 / 1000   sim=2.000 s   wall=2.103 s   slip=+5.1%
+  step  600 / 1000   sim=3.000 s   wall=3.156 s   slip=+5.2%
+  step  800 / 1000   sim=4.000 s   wall=4.208 s   slip=+5.2%
+  step 1000 / 1000   sim=5.000 s   wall=5.256 s   slip=+5.1%
 
 Total sim:  5.000 s
-Total wall: 5.617 s
-Slip:       +12.3% (expected ~+10%)
+Total wall: 5.256 s
+Slip:       +5.1%
 
 Guest UART output:
   *** GR740 RTEMS Hello World ***
@@ -360,16 +360,18 @@ Guest UART output:
 === timing-gr712rc ===
 Binary:   .../apps/02-dual-core-timer/dual_core_timer.exe
 Format:   ELF (-kernel)
-Steps:    5000 x 1 ms = 5.000 s sim time
-Expected: wall ~5.5 s single-core or ~5.9 s SMP, slip ~+10% or ~+17%
+Steps:    1000 x 5 ms = 5.000 s sim time
+Expected: SMP guest, 2 cores — slip ~+3%
 
-  step 1000 / 5000   sim=1.000 s   wall=1.200 s   slip=+20.0%
-  ...
-  step 5000 / 5000   sim=5.000 s   wall=6.016 s   slip=+20.3%
+  step  200 / 1000   sim=1.000 s   wall=1.032 s   slip=+3.2%
+  step  400 / 1000   sim=2.000 s   wall=2.062 s   slip=+3.1%
+  step  600 / 1000   sim=3.000 s   wall=3.092 s   slip=+3.1%
+  step  800 / 1000   sim=4.000 s   wall=4.125 s   slip=+3.1%
+  step 1000 / 1000   sim=5.000 s   wall=5.158 s   slip=+3.2%
 
 Total sim:  5.000 s
-Total wall: 6.016 s
-Slip:       +20.3%
+Total wall: 5.158 s
+Slip:       +3.2%
 
 Guest UART output:
   Core 0: 10
@@ -380,22 +382,63 @@ Guest UART output:
 ```
 
 Both runs demonstrate the operating point fidelity in real time —
-the per-second heartbeat shows sim and wall advancing together
-with a stable slip across the whole 5 seconds, not drifting.
+each heartbeat shows sim and wall advancing together with a stable
+slip across the whole 5 seconds, not drifting.
 
 ## Operating point and timing
 
-The library targets one operating point: **1 ms fixed step under
-`QEMU_CLOCK_REALTIME`, no `-icount`**. This was chosen empirically
-after a granularity sweep.
+The library targets one operating point: **5 ms fixed step under
+`QEMU_CLOCK_REALTIME`, no `-icount`**. This was raised from an
+earlier 1 ms candidate after a multi-core dt-sweep showed the
+per-step floor of the embed wrapper dominates the slip well above
+the noise of TCG execution itself. See [Multi-core dt-sweep](#multi-core-dt-sweep)
+below for the numbers.
 
-### Granularity sweep
+### Multi-core dt-sweep
 
-To find the practical lower bound of the fixed-`dt` stepping
-discipline, `dt` was swept from 1 ms down to 5 µs holding the
-workload constant. Numbers are `wall_dt` (= `virt_dt` under
-REALTIME) in microseconds. Each run advanced the guest by ≈ the
-same amount of virtual time.
+Mean slip over 5 s of guest time across `dt` ∈ {1, 2, 5} ms,
+running the SMP guest on each machine (gr712rc dual-core, gr740
+quad-core). 3 trials per cell, median reported.
+
+| `dt`  | gr712rc SMP (2c) slip | gr740 SMP (4c) slip |
+| ---   | ---                   | ---                 |
+| 1 ms  | +12.1%                | +21.6%              |
+| 2 ms  |  +6.7%                | +12.0%              |
+| 5 ms  |  +3.2%                |  +5.1%              |
+
+The slip is dominated by a fixed per-step cost of the embed wrapper
+(`vm_start → main_loop_wait → vm_stop`), not by TCG execution
+itself. Decomposing `(wall − sim) / N_steps`:
+
+| `dt`  | gr712rc (2c) per-step | gr740 (4c) per-step |
+| ---   | ---                   | ---                 |
+| 1 ms  | 121 µs                | 216 µs              |
+| 2 ms  | 134 µs                | 240 µs              |
+| 5 ms  | 160 µs                | 255 µs              |
+
+Two observations:
+
+1. The per-step floor grows with `dt` (more TCG executed = more
+   BQL acquisitions for incidental IRQ acks / MMIO inside the
+   step) but only mildly compared with the linear `dt` itself, so
+   slip% falls as `dt` rises.
+2. The per-step floor scales roughly with vCPU count: gr740 (4
+   vCPUs) sits ~1.7-1.8× the gr712rc (2 vCPUs) floor. Consistent
+   with each core contributing its own clock-tick IRQ, IRQMP
+   ack, and BQL acquisition per step.
+
+5 ms is the smallest `dt` at which both machines stay below 6 %
+slip under MTTCG with no host tuning (no CPU pinning, no
+`SCHED_FIFO`). Above ~5 ms the marginal improvement flattens; below
+~5 ms the floor dominates fast.
+
+### Original single-core sweep (historical)
+
+The first PoC swept `dt` from 1 ms down to 5 µs on a single-core
+guest (`apps/01-hello-rtems/hello.exe`). Numbers below are
+`wall_dt` in microseconds. These confirmed the two-floor model
+below but did not surface the per-vCPU scaling that the
+multi-core sweep exposed.
 
 Single-core (`apps/01-hello-rtems/hello.exe`):
 
@@ -446,45 +489,58 @@ Three consequences fall out:
    ≈180 µs to p99 (+27%). Two vCPUs bring TCG-lock contention and
    more `main_loop_wait` reasons-to-wake.
 
-### Frozen decision: 1 ms REALTIME
+### Recommended operating point: 5 ms REALTIME
 
-Numbers at the operating point:
+5 ms gives the best mean slip on both machines under MTTCG with
+no host tuning:
 
-- Single-core: p50 = 1.10×, p99 = 1.22×, p99.9 = 1.26× of `dt`.
-- SMP (extrapolated from the 500 µs delta, +27% to p99 vs
-  single-core for the same `dt`): p50 ≈ 1.17×, p99 ≈ 1.35×,
-  p99.9 ≈ 1.40×.
+- gr712rc SMP (2 cores): +3.2% slip.
+- gr740 SMP (4 cores): +5.1% slip.
 
-The 5-second runs in `embed/examples/{gr740,gr712rc}/` confirm:
+The host-side tick rate is 200 Hz at this `dt`. If your consumer
+of the SDK does not need to react to guest events faster than
+~5 ms, this is the recommended default — and is what the bundled
+`embed/examples/{gr712rc,gr740}/` programs use.
 
-| Example                       | Measured slip | Operating-point envelope |
-| ---                           | ---           | ---                      |
-| `gr740/` + `hello-gr740`      | +12.3%        | p50 = 1.10×, p99 = 1.22× |
-| `gr712rc/` + `dual_core_timer`| +20.3%        | p50 SMP = 1.17×, p99 ≈ 1.35× |
+If you need a faster tick rate, the dt-sweep above quantifies the
+tradeoff:
 
-Both within the published envelope.
+| Need                                      | `dt` | gr712rc SMP slip | gr740 SMP slip |
+| ---                                       | ---  | ---              | ---            |
+| 200 Hz tick (recommended default)         | 5 ms |  +3.2%           |  +5.1%         |
+| 500 Hz tick                               | 2 ms |  +6.7%           | +12.0%         |
+| 1 kHz tick (original PoC operating point) | 1 ms | +12.1%           | +21.6%         |
 
-500 µs was the original candidate ("we have plenty of headroom")
-and single-core measurements supported that. SMP narrowed the
-cushion to p99 = 1.65× (35% slack remaining, p99.9 hitting 2.00×),
-comparable to single-core at 250 µs — the same regime rejected
-earlier for tail behaviour. 1 ms re-establishes a comfortable
-cushion at the cost of 1 kHz tick rate vs 2 kHz.
+#### History: why 1 ms was the original frozen point
+
+The first version of this library targeted **1 ms** based on a
+single-core granularity sweep (see below). At that workload the
+slip was a clean +10–12% with comfortable p99 cushion. The
+multi-core sweep added later showed that the per-step floor scales
+with vCPU count, so the same 1 ms `dt` produces +20% slip on
+gr740 SMP — outside the originally-frozen envelope. Rather than
+keep the 1 ms point and absorb the worse SMP numbers, the
+operating point was raised to 5 ms which restores the envelope
+across both machines.
 
 ### Escalation triggers
 
 Revisit the operating-point decision if any of these occur:
 
-- A real workload pushes sustained p99 above ≈1.4 ms at 1 ms `dt`
-  (> 40% slip in the tail). Indicates the loaded-guest assumption
+- A real workload pushes sustained slip above the dt-sweep table
+  values at the same `dt`. Indicates the loaded-guest assumption
   is worse than predicted.
-- The host scheduler requires a tick rate above 1 kHz.
+- The host application needs a tick rate above 200 Hz and the
+  slip at lower `dt` (see table above) is unacceptable. The
+  structural fix is then to redesign the step API so QEMU runs
+  continuously instead of `vm_start`/`vm_stop` per tick (the
+  per-step floor would drop from ~100-250 µs to <10 µs).
 - Determinism becomes a hard requirement → switch to
   `QEMU_CLOCK_VIRTUAL` + `-icount`, blocked today by two issues in
   the gr712rc / gr740 models (see [Limitations](#limitations)).
 - Deployment moves to a preempt-RT kernel with CPU isolation →
-  re-run the sweep; the p99 floor likely drops and finer `dt`
-  becomes viable.
+  re-run the sweep; the per-step floor likely drops and finer
+  `dt` becomes viable.
 
 ### Reproducing the sweep
 
