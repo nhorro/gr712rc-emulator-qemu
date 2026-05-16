@@ -244,9 +244,9 @@ fundamentally unfit for some unforeseen reason.
 | REALTIME `embed_qemu_step(dt)` (Model A)             | Shipped, current default                |
 | `qemu_notify_event` exported for cross-thread wake   | Shipped (1d32a74, 16f8dc3)              |
 | Flag-based step deadline callback                    | Shipped (16f8dc3)                       |
-| icount mode opt-in API (Models B/C)                  | Shipped (b8899a4) — `embed_qemu_init_icount` + `embed_qemu_step_locked` |
-| Absolute virtual deadlines in step API               | Shipped (b8899a4) — `embed_qemu_step_locked` |
-| gr740 SMP under `-icount` (Blocker B)                | **Diagnosed, not fixed** — virtual-time starvation under rr+icount (see Update — May 2026 below). SMP guests degraded on gr712rc, hang on gr740. |
+| icount mode opt-in API (Models B/C)                  | **Not shipped** — wrapper changes only, 1-2 days |
+| Absolute virtual deadlines in step API               | **Not shipped** — required for Model B  |
+| gr740 SMP under `-icount` (Blocker B)                | **Not investigated** — needed for parity if Model B/C is offered |
 | Host-side peripheral SDK (Model D substrate)         | Shipped (`docs/12-host-side-peripherals.md`) |
 | Documented "sampling loop" host pattern (Model D)    | **Not shipped** — would need example + doc |
 | Determinism via virtual-time-paced peripherals       | **Not shipped** — design pass required, depends on Model B |
@@ -295,47 +295,6 @@ Step 1 is low-risk modest-scope and provides immediate
 building-block value for any future consumer needing
 lockstep sync. Step 2 is gating for full machine parity on
 the icount mode.
-
-### Update — May 2026: Blocker B diagnosed
-
-Steps 1 and 2 were both attempted in a single investigation
-session. **Step 1 shipped** (commit `b8899a4`, `embed/`
-wrapper API + two new examples + docs/11 Mode B section).
-**Step 2's diagnosis is complete** and refutes the original
-hypothesis ("icount_percpu_budget / 4-vCPU saturation"):
-
-| Original suspect                                  | Verdict |
-| ---                                               | --- |
-| 4 vCPUs saturate `icount_percpu_budget`           | Refuted — `-smp 2` also hangs |
-| `qemu_cpu_kick` fails under rr-mode               | Refuted — `info cpus` shows all 4 vCPUs running |
-| `ldstub` / `casa` atomicity broken under rr+icount | Refuted — `gen_ldstub_asi` uses real `tcg_gen_atomic_xchg_tl` |
-| IPI delivery mechanism broken                      | Refuted (broader) — **no** external interrupts fire, not just IPIs |
-
-**Actual root cause**: virtual-time starvation under `-icount` +
-round-robin TCG when the guest runs tight software-trap loops
-(e.g., RTEMS SMP ticket-lock `ta 0x9` / `ta 0xA` pairs during
-boot coordination). A 3-second trap-log sample of gr740 SMP
-under `-icount auto,sleep=on` captured **228,997 software
-traps and 0 external interrupts** — no timer tick, no IPI, no
-device IRQ. RTEMS SMP boot's `_Per_CPU_State_change` polling
-loops never break because the IPI/timer events that should
-break them are never delivered. With 2 CPUs (gr712rc SMP), the
-trap density is lower and the timer occasionally fires —
-"degraded but working" — vs 4 CPUs (gr740 SMP) where it
-starves completely.
-
-This is not a gr740-specific bug. `gr740_cpu_start` and
-`gr712rc_cpu_start` are byte-for-byte identical. The
-interaction is between QEMU's icount virtual-time accounting in
-rr-mode and any guest that does software-trap-heavy inner
-loops. Likely upstream-QEMU-level.
-
-**Remediation chosen** (May 2026): document the limitation in
-docs/11 Mode B section; do not pursue a fork-local fix without
-a consumer who needs gr740 SMP under Model B. An upstream QEMU
-bug report (with the reproducer command and trap-count
-evidence) is queued but not prerequisite to anything in this
-repo.
 
 ## Closing
 
