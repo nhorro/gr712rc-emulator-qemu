@@ -271,13 +271,12 @@ embed/embed_qemu.h
 embed/embed_qemu.c
 ```
 
-It exposes two operating modes — pick one at init time, do not
-mix — plus an `EmbedStepStats` struct that captures per-step
-timing. The wrapper hides the iothread / timer / runstate
-mechanics behind:
+It exposes a 3-function API — `embed_qemu_init`, `embed_qemu_step`,
+`embed_qemu_cleanup` — plus an `EmbedStepStats` struct that
+captures per-step timing. The wrapper hides the iothread / timer /
+runstate mechanics behind:
 
 ```c
-/* Model A — default, REALTIME-clock pacing. */
 embed_qemu_init(qargc, qargv);
 for (...) {
     EmbedStepStats st;
@@ -285,22 +284,7 @@ for (...) {
     if (st.guest_left_running_state) break;
 }
 embed_qemu_cleanup();
-
-/* Model B — opt-in, icount + absolute VIRTUAL-clock lockstep. */
-embed_qemu_init_icount(qargc, qargv);  /* injects -icount auto,sleep=on */
-for (...) {
-    EmbedStepStats st;
-    embed_qemu_step_locked(dt_ns, &st); /* deadline at t_epoch + n*dt */
-    if (st.guest_left_running_state) break;
-}
-embed_qemu_cleanup();
 ```
-
-The two modes share `embed_qemu_cleanup`, `EmbedStepStats`, and
-the lifecycle / threading contract. They differ only in which
-clock paces the step deadline and how the deadline is computed.
-See [Mode B — icount lockstep (opt-in)](#mode-b--icount-lockstep-opt-in)
-for when to pick B over A.
 
 It also intercepts `exit()` so that a `&error_fatal` path inside
 QEMU returns an error code from `embed_qemu_init()` instead of
@@ -318,21 +302,15 @@ wrapper for C++) is expected to write its own wrapper against
 
 ## The bundled examples
 
-Four minimal example programs live under `embed/examples/`. Each
-takes exactly one argument — the guest binary. The Model A
-examples run 1000 steps of 5 ms; the Model B (lockstep) examples
-run up to 5000 steps of 1 ms.
+Two minimal example programs live under `embed/examples/`. Each
+takes exactly one argument — the guest binary — and runs 1000
+steps of 5 ms (= 5 seconds of guest time) so that you can SEE the
+wall-clock keeping pace with simulated time.
 
-| Path                                | Mode | Machine     | Default guest                              |
-| ---                                 | ---  | ---         | ---                                        |
-| `embed/examples/gr740/`             | A    | `-M gr740`  | `apps/07-hello-gr740/hello.exe`            |
-| `embed/examples/gr712rc/`           | A    | `-M gr712rc`| `apps/02-dual-core-timer/dual_core_timer.exe` |
-| `embed/examples/gr740-lockstep/`    | B    | `-M gr740`  | `apps/07-hello-gr740/hello.exe` (single-core BSP) |
-| `embed/examples/gr712rc-lockstep/`  | B    | `-M gr712rc`| `apps/02-dual-core-timer/dual_core_timer.exe` |
-
-The gr740 lockstep example pins to a single-core BSP because
-gr740 SMP under `-icount` is blocked
-(see [Mode B](#mode-b--icount-lockstep-opt-in)).
+| Path                          | Machine     | Default guest                              |
+| ---                           | ---         | ---                                        |
+| `embed/examples/gr740/`       | `-M gr740`  | `apps/07-hello-gr740/hello.exe`            |
+| `embed/examples/gr712rc/`     | `-M gr712rc`| `apps/02-dual-core-timer/dual_core_timer.exe` |
 
 The guest binary is auto-detected as either ELF (loaded with
 `-kernel`) or a raw ROM image (loaded with `-bios`) by sniffing
@@ -406,124 +384,6 @@ Guest UART output:
 Both runs demonstrate the operating point fidelity in real time —
 each heartbeat shows sim and wall advancing together with a stable
 slip across the whole 5 seconds, not drifting.
-
-## Mode B — icount lockstep (opt-in)
-
-Model B is for hosts that need **deterministic virtual-time
-alignment** with an external scheduler, rather than real-time
-pacing. The two-line difference from Model A:
-
-```c
-embed_qemu_init_icount(qargc, qargv);   /* was: embed_qemu_init */
-embed_qemu_step_locked(dt_ns, &st);     /* was: embed_qemu_step  */
-```
-
-### What it does
-
-- Injects `-icount auto,sleep=on` into `qargv` before calling
-  `qemu_init`, putting QEMU into instruction-count mode and
-  letting it skip idle intervals.
-- Arms the step deadline timer on `QEMU_CLOCK_VIRTUAL` instead of
-  `QEMU_CLOCK_REALTIME`.
-- Computes each step's deadline as `t_epoch_virt + n*dt`, where
-  `t_epoch_virt` is the VIRTUAL-clock reading at init time and
-  `n` is the step number. Per-step overshoot does **not**
-  accumulate: a slow step does not push the next deadline out;
-  if a step overshoots by D ns, the next step's deadline lands
-  D ns sooner than `now + dt`, so the wrapper auto-corrects.
-
-The lockstep guarantee: **total drift over N steps is bounded by
-one step's overshoot, regardless of N**. Contrast with Model A
-where per-step slip accumulates linearly with N.
-
-### When to pick B over A
-
-| Scenario                                                   | Pick |
-| ---                                                        | --- |
-| HIL / SIL with a wall-clock-paced external system          | A   |
-| Wall-clock visualisation / monitoring                      | A   |
-| Co-simulation with another simulator that advances in steps | B  |
-| Deterministic replay of a sim run                          | B   |
-| Long-run drift must be bounded regardless of host load     | B   |
-
-Model A is the right default if you don't have a specific reason
-to pick B — REALTIME pacing matches HIL workflow intuitions and
-avoids icount's runtime cost.
-
-### Default icount mode: `auto,sleep=on`
-
-The wrapper hardcodes `-icount auto,sleep=on`. The lockstep
-guarantee (absolute virtual deadlines) is independent of the
-icount shift value — only the absolute rate at which virtual time
-advances changes. `shift=auto` is the portable default because a
-fixed `shift=10` (the earlier docs/13 operating point on gr712rc)
-hangs the gr740 BSP at boot. Callers who need a deterministic
-fixed shift for replay should write their own wrapper against
-`libqemu.h` directly with the shift baked into `qargv` before
-calling `qemu_init`.
-
-### Limitation: gr740 SMP is blocked
-
-gr740 SMP (4 active vCPUs) under `-icount` hangs at every shift
-value tested (Blocker B, see
-[docs/14-co-simulation-scheduling.md](14-co-simulation-scheduling.md)).
-The `gr740-lockstep` example side-steps this by using a
-single-core BSP build (`apps/07-hello-gr740` is `BSP=gr740`, not
-`gr740_smp`), so cores 1-3 stay halted at reset and only CPU 0
-makes progress under round-robin TCG.
-
-To run an SMP gr740 guest under Model B, Blocker B has to be
-resolved first (Camino C in docs/14 "Queued next steps").
-gr712rc SMP under Model B works fine.
-
-### Expected output (gr712rc with dual-core-timer, Model B)
-
-```
-=== timing-gr712rc-lockstep (Model B) ===
-Mode:     -icount auto,sleep=on (injected by init_icount)
-Pacing:   absolute VIRTUAL deadlines (t_epoch + n*dt)
-
-  step 1000 / 5000   virt=1.000 s   wall=1.271 s   virt_drift=+17320 ns
-  step 2000 / 5000   virt=2.000 s   wall=2.434 s   virt_drift=+21046 ns
-  step 3000 / 5000   virt=3.000 s   wall=3.562 s   virt_drift=+118005 ns
-  step 4000 / 5000   virt=4.000 s   wall=4.682 s   virt_drift=+41775 ns
-  step 5000 / 5000   virt=5.000 s   wall=5.785 s   virt_drift=+27325 ns
-
-Total sim (target): 5.000 s
-Total virt (actual): 5.000 s
-Total wall:          5.785 s
-Virt drift:          +27325 ns  (lockstep guarantee)
-```
-
-The intermediate per-checkpoint `virt_drift` values can spike
-during CPU-bound transients (BSP boot, IRQ storms) and then
-collapse back as the absolute-deadline scheme catches up — that
-shape is expected, not a bug. **The final drift** — bounded by
-one step's overshoot, here ~27 µs over 5 s sim — is the lockstep
-guarantee.
-
-### Expected output (gr740 with hello, Model B)
-
-```
-=== timing-gr740-lockstep (Model B) ===
-Cores:    single-core BSP — cores 1-3 stay halted (Blocker B)
-
-  step 1000 / 5000   virt=1.000 s   wall=24.175 s   virt_drift=+32 ns
-  step 2000 / 5000   virt=2.000 s   wall=41.565 s   virt_drift=+1568 ns
-  step 3000 / 5000   virt=3.000 s   wall=58.354 s   virt_drift=+32 ns
-  step 4000 / 5000   virt=4.000 s   wall=78.004 s   virt_drift=+1568 ns
-  step 5000 / 5000   virt=5.000 s   wall=97.238 s   virt_drift=+67616 ns
-
-Total wall:          97.238 s
-Virt drift:          +67616 ns  (lockstep guarantee)
-```
-
-Wall ≫ virt here (97 s wall for 5 s virt) because `shift=auto`
-picked a slow virtual rate for this guest workload, and Model B
-makes no attempt to track wall time — the whole point of B is
-that virtual time is decoupled from real time. If your external
-scheduler is fine with that decoupling, Model B is the right tool;
-if you need real-time pacing, use Model A.
 
 ## Operating point and timing
 
@@ -735,74 +595,76 @@ pattern.
 ### Determinism / icount
 
 Bit-exact reproducibility and decoupled virtual time require
-`-icount` (optionally with `sleep=on`). The path is partly shipped
-as Model B (see [Mode B — icount lockstep](#mode-b--icount-lockstep-opt-in));
-this section documents what works, what doesn't, and why.
+`-icount` (optionally with `sleep=on`). Earlier revisions of this
+doc claimed the path was blocked by an MPSTATUS CPU-release
+deadlock during BSP init; an audit (May 2026) found that
+diagnosis is incorrect. SMP startup completes successfully under
+`-icount`. The real picture, with empirical results, is below.
 
 **What works under `-icount` today:**
 
-- **gr712rc SMP** boots and runs cleanly under `-icount` via
-  plain `qemu-system-sparc` and via the Model B wrapper
+- **gr712rc SMP** boots and runs cleanly under
+  `-icount shift=10,sleep=on` via plain `qemu-system-sparc`
   (verified with `apps/02-dual-core-timer/dual_core_timer.exe`).
-- **Single-core guests on either machine** work via the Model B
-  wrapper under `shift=auto,sleep=on` (the wrapper default).
-  For plain `qemu-system-sparc`, `shift=8` and `shift=10` are
-  also usable on gr712rc; `shift=auto` from the CLI has been
-  observed to hang on some workloads but works through the
-  Model B wrapper on the workloads tested in
-  `embed/examples/{gr712rc,gr740}-lockstep/`.
-- **VIRTUAL-clock-paced stepping in the wrapper** works:
-  `embed_qemu_step_locked` arms the deadline on
-  `QEMU_CLOCK_VIRTUAL`, the callback fires from the
-  `rr_cpu_thread_fn` context via `icount_handle_deadline`, and
-  `qemu_notify_event()` (added by commit 1d32a74) wakes the
-  host thread's `ppoll`. The original wake-up bug that blocked
-  this path was fixed by the flag-based callback design in
-  commit 16f8dc3.
+  Both LEON3FT cores execute and the clock tick fires.
+- `shift=8` and `shift=10` are the empirically usable fixed
+  values for gr712rc. `shift=auto` hangs (the adaptive
+  algorithm starts at `shift=3` and the initial deadline
+  computation puts the warp timer effectively unreachable in
+  wall-clock terms; even after the auto loop climbs to
+  `shift=10`, `qemu_icount_bias` has accumulated state that
+  doesn't recover).
+- **Single-core guests** on either machine work under all
+  tested shifts (0, 4, 8, 10, auto).
 
 **What's still blocked:**
 
 1. **gr740 SMP fails under `-icount` at every shift**
    (0, 4, 8, 10, 12, auto), regardless of `sleep=on`. The
-   `gr740-lockstep` example side-steps this by pinning to a
-   single-core BSP build (cores 1-3 stay halted at reset).
-   Suspected cause: the per-vCPU icount budget / deadline
-   handling in `accel/tcg/tcg-accel-ops-rr.c` when all four
-   vCPUs make active progress under round-robin TCG. Requires
-   deeper instrumentation to confirm — tracked as Blocker B in
-   `docs/14-co-simulation-scheduling.md` and queued for
-   investigation as Camino C.
+   3-cores-halted-at-reset configuration (e.g.
+   `apps/07-hello-gr740/hello.exe`, where the BSP doesn't
+   release CPU1-3) works at some shifts. Suspected cause:
+   the per-vCPU icount budget / deadline-handling interaction
+   in `accel/tcg/tcg-accel-ops-rr.c` when all four vCPUs make
+   active progress under round-robin TCG. Requires deeper
+   instrumentation to confirm.
 
-2. **Fixed `shift` for replay-grade determinism**: the wrapper
-   hardcodes `shift=auto` for portability. Bit-exact replay
-   requires a fixed shift (so the host-instruction-to-virtual-ns
-   mapping is reproducible across runs); the wrapper does not
-   currently expose `shift` as a parameter. Callers who need
-   replay determinism should write their own wrapper against
-   `libqemu.h` directly with a fixed shift baked into `qargv`.
+2. **VIRTUAL-clock-paced stepping in the embed wrapper** does
+   not wake the host's `main_loop_wait`. The intended pattern
+   is `embed_timer_new_ns(QEMU_CLOCK_VIRTUAL, ...)` armed at
+   `qemu_clock_get_ns(VIRTUAL) + dt`. The timer callback DOES
+   fire (in the `rr_cpu_thread_fn` context, via
+   `icount_handle_deadline`) and `vm_stop` does run, but no
+   `qemu_notify_event()` propagates back to the host thread's
+   `ppoll`, so the step loop hangs indefinitely. Until this
+   wake-up is plumbed, the host cannot use VIRTUAL deadlines
+   and the wrapper falls back to wall-clock pacing.
 
-**What `-icount` alone (without VIRTUAL deadlines) does not buy:**
+**What `-icount` alone does not buy:**
 
 Adding `-icount shift=10,sleep=on` to the qargv while keeping
-the REALTIME-clock step deadline (i.e., Model A with `-icount`
-manually injected) gives slip identical to the baseline —
-measured +12.2% vs +12.1% at dt=1 ms on gr712rc SMP. The
-step-loop floor (`vm_start` / `main_loop_wait` / `vm_stop`
-coordination across threads) is independent of icount mode.
-Picking up the lockstep benefit requires Model B
-(`embed_qemu_init_icount` + `embed_qemu_step_locked`), not just
-icount.
+the REALTIME-clock step deadline gives slip identical to the
+baseline — measured +12.2% vs +12.1% at dt=1 ms on gr712rc SMP.
+The step-loop floor (`vm_start` / `main_loop_wait` / `vm_stop`
+coordination across threads) is independent of icount mode. The
+icount path only pays off if the deadline can be VIRTUAL **and**
+the wake-up issue above is solved.
 
-Sub-millisecond stepping was investigated via two paths (Option
-2: cheaper vm_start/vm_stop; Option 3: `-icount` + VIRTUAL
-deadline). Both were implemented and measured.
+Until both blockers are addressed, the wrapper is wall-clock-paced
+and the documented 5 ms operating point is the recommended setting.
+For HIL applications that is the desired semantics anyway.
+
+Sub-millisecond stepping was investigated via two paths (Option 2:
+cheaper vm_start/vm_stop; Option 3: `-icount` + VIRTUAL deadline).
+Both were implemented and measured.
 [`docs/13-icount-step-pacing.md`](13-icount-step-pacing.md)
 documents the results. Short version: the per-step floor of
 ~120-220 µs is structural cross-thread coordination cost on
 Linux pthread + MTTCG and is **not** addressable by either
-approach. icount mode does work after the wake-up fix and brings
-idle-time warping plus a foundation for deterministic replay,
-but does not deliver sub-1 ms wall-clock pacing.
+approach. icount mode does work after a one-line SDK fix
+(documented in docs/13) and brings idle-time warping plus a
+foundation for deterministic replay, but does not deliver
+sub-1 ms pacing.
 
 ### `abort()` not intercepted
 
