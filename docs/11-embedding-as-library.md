@@ -432,63 +432,6 @@ slip under MTTCG with no host tuning (no CPU pinning, no
 `SCHED_FIFO`). Above ~5 ms the marginal improvement flattens; below
 ~5 ms the floor dominates fast.
 
-### Original single-core sweep (historical)
-
-The first PoC swept `dt` from 1 ms down to 5 µs on a single-core
-guest (`apps/01-hello-rtems/hello.exe`). Numbers below are
-`wall_dt` in microseconds. These confirmed the two-floor model
-below but did not surface the per-vCPU scaling that the
-multi-core sweep exposed.
-
-Single-core (`apps/01-hello-rtems/hello.exe`):
-
-| dt req. | n     | min  | p50  | p90  | p99  | p99.9 | max  | p50/dt | p99/dt |
-| ---     | ---   | ---  | ---  | ---  | ---  | ---   | ---  | ---    | ---    |
-| 1000 µs | 200   | 1022 | 1101 | 1160 | 1224 | 1263  | 1363 | 1.10×  | 1.22×  |
-| 500 µs  | 400   | 520  | 548  | 599  | 649  | 764   | 1586 | 1.10×  | 1.30×  |
-| 250 µs  | 800   | 269  | 290  | 341  | 418  | 679   | 1060 | 1.16×  | 1.67×  |
-| 100 µs  | 2000  | 118  | 141  | 164  | 224  | 532   | 2582 | 1.41×  | 2.24×  |
-| 10 µs   | 20000 | 23   | 37   | 50   | 89   | 200   | 526  | 3.70×  | 8.90×  |
-| 5 µs    | 40000 | 23   | 35   | 46   | 75   | 171   | 555  | 7.00×  | 15.0×  |
-
-SMP (`apps/02-dual-core-timer/dual_core_timer.exe`):
-
-| dt req. | n   | min | p50 | p90 | p99 | p99.9 | max  | p50/dt | p99/dt |
-| ---     | --- | --- | --- | --- | --- | ---   | ---  | ---    | ---    |
-| 500 µs  | 400 | 528 | 596 | 696 | 825 | 999   | 1600 | 1.19×  | 1.65×  |
-
-### Two-floor model
-
-The data fits a simple model: each step costs the requested `dt`
-plus a fixed amount of overhead, with two distinct floors — one
-for typical-case latency and a larger one for tail latency.
-
-| dt   | p50 obs | dt + 50 µs | p99 obs | dt + 150 µs |
-| ---  | ---     | ---        | ---     | ---         |
-| 1000 | 1101 µs | 1050 µs    | 1224 µs | 1150 µs     |
-| 500  | 548 µs  | 550 µs     | 649 µs  | 650 µs      |
-| 250  | 290 µs  | 300 µs     | 418 µs  | 400 µs      |
-| 100  | 141 µs  | 150 µs     | 224 µs  | 250 µs      |
-
-The ≈50 µs p50 floor is the cost of one `vm_start → arm timer →
-main_loop_wait → vm_stop` cycle plus an `epoll_wait`. The ≈150 µs
-p99 floor is host-scheduler jitter — GLib timer expiry and kernel
-wakeup noise. CPU pinning + `SCHED_FIFO` would compress the p99
-floor but cannot push the p50 floor below the cycle cost.
-
-Three consequences fall out:
-
-1. **Below `dt ≈ 25 µs`** the median floor dominates (p50/dt > 3.7×).
-   Asking for a finer slice no longer buys finer time resolution,
-   only more CPU spent in the stepping machinery.
-2. **Below `dt ≈ 150 µs`** the tail floor dominates (p99/dt > 2×).
-   Median may still look acceptable but the worst case roughly
-   doubles the requested slice.
-3. **SMP widens the tail more than it shifts the median.** Going
-   single-core → SMP at 500 µs added ≈50 µs to p50 (+9%) but
-   ≈180 µs to p99 (+27%). Two vCPUs bring TCG-lock contention and
-   more `main_loop_wait` reasons-to-wake.
-
 ### Recommended operating point: 5 ms REALTIME
 
 5 ms gives the best mean slip on both machines under MTTCG with
@@ -510,18 +453,6 @@ tradeoff:
 | 200 Hz tick (recommended default)         | 5 ms |  +3.2%           |  +5.1%         |
 | 500 Hz tick                               | 2 ms |  +6.7%           | +12.0%         |
 | 1 kHz tick (original PoC operating point) | 1 ms | +12.1%           | +21.6%         |
-
-#### History: why 1 ms was the original frozen point
-
-The first version of this library targeted **1 ms** based on a
-single-core granularity sweep (see below). At that workload the
-slip was a clean +10–12% with comfortable p99 cushion. The
-multi-core sweep added later showed that the per-step floor scales
-with vCPU count, so the same 1 ms `dt` produces +20% slip on
-gr740 SMP — outside the originally-frozen envelope. Rather than
-keep the 1 ms point and absorb the worse SMP numbers, the
-operating point was raised to 5 ms which restores the envelope
-across both machines.
 
 ### Escalation triggers
 
@@ -640,12 +571,6 @@ and the empirical diagnosis are preserved in git history at
 `b8899a4` and `b8e8008` if a future consumer with single-core
 constraints justifies revisiting.
 
-`docs/13-icount-step-pacing.md` documents the earlier
-investigation of sub-millisecond stepping under `-icount` +
-VIRTUAL deadlines. Short version: the per-step floor of
-~120–220 µs is structural cross-thread coordination cost on
-Linux pthread + MTTCG and is not addressable by icount.
-
 ### `abort()` not intercepted
 
 The wrapper intercepts `exit()` only. A small number of QEMU paths
@@ -687,80 +612,13 @@ responsibility.
 
 ## Design journey
 
-A brief record of how the architecture got to its current shape,
-useful when a future iteration needs context.
-
-The work proceeded in four iterations, each driven by what the
-previous revealed about what "embedding" actually meant in
-practice.
-
-### Iteration 1 — flags on `qemu-system-sparc`
-
-The first PoC added `--embed-poc` and `--embed-poc-step <kernel>
-<dt_us> <n_steps>` flags to `qemu/system/main.c`. The "embedder"
-was the QEMU binary itself with extra command-line arguments.
-This proved that `qemu_init()` / step / `qemu_cleanup()` was a
-viable lifecycle inside a custom `main()`, and produced the
-granularity sweep data above.
-
-It also exposed three concrete findings that overrode the original
-NOTES sketch:
-
-- `qemu_init()` returns with the iothread mutex held; double-locking
-  trips an assertion.
-- `QEMU_CLOCK_VIRTUAL` timers do not wake `main_loop_wait` without
-  `-icount`. Use `QEMU_CLOCK_REALTIME` for non-deterministic mode.
-- `-nographic` auto-cables serial+monitor to stdio; use
-  `-display none -monitor none -serial file:...` when stdout is
-  reserved for measurement output.
-
-### Iteration 2 — in-tree separate binaries
-
-The flags-on-qemu-system-sparc model fudged the embedding question:
-the "host" was still QEMU itself. Iteration 2 produced two
-separate binaries — `embed-gr740` and `embed-gr712rc-smp` — built
-by QEMU's meson alongside `qemu-system-sparc`, each with its own
-`main()` linking the same `libqemu-sparc-softmmu.fa` static
-archive. A reusable wrapper API (`embed_qemu_init/step/cleanup`)
-emerged from comparing the two examples.
-
-Still inside the QEMU submodule. Still tied to QEMU's build
-system. The "external host" was theoretical.
-
-### Iteration 3 — true shared library, host outside the tree
-
-Iteration 3 added a `shared_library('qemu-sparc', ...)` target to
-QEMU's meson that produces `libqemu-sparc.so` by extracting the
-same objects from the static archive. A standalone host program
-moved into `embed/examples/` (parent repo), compiled by plain `gcc
-+ Makefile`, linking against the `.so` via `-lqemu-sparc -Wl,-rpath`.
-
-This iteration solved the real embedding question. It also surfaced:
-
-- The need for `b_staticpic=true` to allow the link.
-- The fact that `timer_new_ns` / `timer_free` are `static inline`
-  in QEMU's public headers, so an external linker cannot resolve
-  them. Solved by adding paper-thin forwarders
-  (`embed_timer_new_ns` / `embed_timer_free`) in
-  `qemu/system/embed_api.c`.
-- The wrapper's `embed_qemu.c` still depended on QEMU's internal
-  headers, which leaked QEMU into the consumer build.
-
-### Iteration 4 — SDK header and hardening
-
-The final iteration produced `qemu/include/libqemu.h` — a
-hand-curated public ABI header with no QEMU includes — and
-rewrote `embed/embed_qemu.c` to use it. The .so was tightened with
-a linker version script restricting exports from ≈30000 symbols to
-14, `exit()` interception was added so `error_fatal` returns
-instead of killing the host, and `_Static_assert` drift guards
-make the .so build fail if QEMU's enums diverge from the header.
-
-Two simple per-machine examples (`embed/examples/gr740/` and
-`embed/examples/gr712rc/`) replaced the earlier generic
-parameterized host, focusing the demonstration on the timing
-fidelity question: do 5 seconds at 1 ms steps actually meet the
-operating point?
+The SDK arrived through four iterations: PoC flags on
+`qemu-system-sparc`, then in-tree embed binaries, then a true
+`.so` consumed by a host outside the QEMU tree, and finally the
+hand-curated `libqemu.h` + linker version script + `exit()`
+interception that make up today's surface. Git history carries
+the per-iteration detail; the lessons worth carrying forward are
+below.
 
 ### Lessons that generalise
 

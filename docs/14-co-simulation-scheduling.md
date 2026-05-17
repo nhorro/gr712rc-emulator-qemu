@@ -1,347 +1,103 @@
-# Embedding QEMU under an external scheduler
+# Co-simulation scheduling — design FAQ
 
-**Status**: design evaluation, May 2026.
+**Status**: design reference, May 2026. Answers "why isn't X
+shipped?" without requiring readers to re-derive abandoned
+investigations.
 
-Use this document when planning to co-simulate the embedded
-QEMU emulator alongside an external scheduler — a HIL test
-harness, a physics simulator, a co-simulation orchestrator. It
-catalogues the available coupling models, the empirical cost of
-each, and which fits which use case. It does NOT prescribe a
-single answer — the right choice depends on what the external
-scheduler is and what timing guarantees are required.
+The SDK ships exactly one coupling model between an external
+scheduler and QEMU: **Model A — REALTIME pacing at dt = 5 ms**.
+The operating point and its empirical justification live in
+`docs/11-embedding-as-library.md § Operating point and timing`.
+This document records what else was considered, why it was
+rejected, and what would be required if a future consumer
+forces the question.
 
-## Problem statement
+## Why not lockstep / deterministic stepping (Model B, `-icount`)
 
-There are two schedulers in the loop:
+A lockstep API (`embed_qemu_init_icount` + `embed_qemu_step_locked`,
+absolute virtual deadlines, bit-exact reproducibility) was
+prototyped in commit `b8899a4` and reverted in `3041aee`.
 
-- **External scheduler**: the consumer of the SDK. Advances some
-  notion of time by `dt` per cycle. Examples: a Simulink
-  Real-Time host running at 1 kHz, a SystemC TLM kernel running
-  as-fast-as-possible, a custom Python test harness running
-  ad-hoc.
-- **QEMU's internal scheduler**: vCPU threads under MTTCG, the
-  iothread, the GLib main loop. Advances guest time as it
-  executes guest instructions and processes virtual devices.
+**Why it doesn't work for this project**: the primary apps are
+SMP RTEMS (`apps/02-dual-core-timer`, `apps/08-gr740-smp`). Under
+`-icount` + round-robin TCG, the RTEMS SMP ticket-lock pattern
+(`_SMP_lock_ISR_disable_and_acquire`, paired `ta 0x9` / `ta 0xA`
+software traps) keeps `PSR.PIL=15` for >99% of execution. External
+IRQs (timer ticks, IPIs) are masked during that window; the brief
+PIL-low windows between `rett` and the next `ta 0x9` are too short
+for the rr scheduler to land an IRQ before the next critical
+section starts.
 
-For the co-simulation to be useful, the two schedulers must
-**agree on time** when they synchronise. The questions are:
+**Empirical evidence** (preserved in commit `b8e8008`):
 
-1. What does "agree on time" mean in this deployment? (Virtual
-   time only? Wall clock too?)
-2. How fine can `dt` get before the coupling overhead eats the
-   step?
-3. Is drift between the two clocks bounded, or does it
-   accumulate?
+- gr740 SMP under `-icount auto,sleep=on`: 228,997 software traps
+  and **0 external interrupts** in 3 seconds wall. Complete hang.
+- gr712rc SMP under the same config: boots and runs, but
+  ~10× slower than Model A (~10 lines of UART vs ~100+ in the
+  same wall budget).
+- Refuted: per-cpu icount budget saturation (`-smp 2` also hangs),
+  `qemu_cpu_kick` failure (CPUs confirmed running), `ldstub`/`casa`
+  atomicity (uses `tcg_gen_atomic_xchg_tl`), higher icount shifts
+  (full 0–10 sweep + `align=on` + `sleep=off` all hang).
 
-## What this session established (empirical, May 2026)
+**When to reconsider**: only if (a) a consumer needs lockstep AND
+can use single-core guests exclusively, or (b) upstream QEMU
+addresses the rr+icount+PIL-spin interaction. Re-cherry-pick from
+`b8899a4` minus the SMP examples.
 
-Measured on a contemporary Linux host (no special tuning) with
-the SDK's REALTIME pacing model:
+## Why not sub-millisecond stepping
 
-| Machine          | Per-step floor | Slip at dt = 1 ms | Slip at dt = 5 ms |
-| ---              | ---            | ---               | ---               |
-| gr712rc SMP (2c) | ~120 µs        | +12 %             | +3 %              |
-| gr740   SMP (4c) | ~220 µs        | +22 %             | +5 %              |
+The wall-clock floor of one `vm_start → main_loop_wait → vm_stop`
+cycle on Linux + MTTCG is ~120 µs (gr712rc SMP) to ~220 µs
+(gr740 SMP). Three variants of `pause_all_vcpus` were measured;
+the floor moved < 10 µs across all of them. The cost is structural
+cross-thread futex / BQL handover, not addressable at the
+deadline-firing layer.
 
-**The per-step floor is structural** — it is the wall-clock cost
-of `vm_start` + `main_loop_wait` + `vm_stop` cycling, dominated
-by cross-thread futex / BQL handover. It is independent of
-guest workload, independent of which clock (REALTIME vs
-VIRTUAL) drives the deadline, and not addressable by patching
-`pause_all_vcpus` (three variants attempted, none moved the
-floor more than ~10 µs).
+Consequence: any `dt` below ~1 ms makes the floor dominate
+(>20% slip on gr740 SMP at dt = 1 ms, see the dt-sweep in
+`docs/11`). The recommended 5 ms point sits comfortably above
+the floor.
 
-See `docs/13-icount-step-pacing.md` for the detailed measurement
-data and the Option 2 / Option 3 investigation.
+## What Model D would be (if sub-ms sampling is ever required)
 
-## Restating the constraint
-
-The previous summary one might infer — *"having two schedulers
-is too expensive"* — is half right.
-
-- **Right**: the per-step coordination cost is real and not
-  removable. At `dt = 100 µs` the floor exceeds the requested
-  step (~250 µs floor vs 100 µs target), so the coupling can't
-  go finer than ~ms scale.
-- **Wrong**: that sync between the two schedulers is
-  fundamentally broken. Sync is solvable cleanly when the
-  external scheduler's clock is virtual; what cannot be made
-  cheaper is the per-step **wall** cost.
-
-The decision then becomes: pick the coupling model whose timing
-guarantees match the external scheduler's, and budget around
-the ~150 µs per-step floor.
-
-## Solution catalogue
-
-Five models, each evaluated on the same axes: how it couples,
-what kind of drift it has, what kind of real-time semantics it
-provides, and what work remains in the SDK to use it.
-
-### Model A — REALTIME pacing (current default)
-
-```
-external      QEMU
-+---------+   +-------+
-| step dt |---| arm REALTIME timer at wall+dt
-|         |   | vm_start vCPUs
-|         |   | wait timer
-|         |---| vm_stop @ wall ~= old+dt+floor
-+---------+   +-------+
-```
-
-- **Mechanism**: deadline timer on `QEMU_CLOCK_REALTIME`, fires
-  when wall clock crosses `now + dt`. vm_stop runs from the
-  iothread context.
-- **Drift between clocks**: guest virtual time and the external
-  clock both track wall clock. The QEMU step takes
-  `dt + ~150 µs` of wall. The external scheduler thinks it
-  advanced `dt`; QEMU's wall clock advanced `dt + 150 µs`. After
-  N steps, guest is N×150 µs *ahead* of the external scheduler.
-  At dt = 1 ms this is 15 % cumulative drift over 100 steps.
-- **Real-time matching**: by construction wall ≈ guest.
-- **Effort to use**: zero. This is what `embed_qemu_step(dt)`
-  does today.
-- **Fit for**: HIL demos, single-cycle smoke tests, anything
-  where ±10 % timing is acceptable. Most "I just want a guest
-  running" use cases.
-- **Doesn't fit**: lockstep co-simulation, regression testing
-  with bit-exact replay, any workflow that does many steps and
-  cares that they don't drift.
-
-### Model B — `-icount` + absolute virtual deadlines (lockstep)
-
-```
-external      QEMU
-+---------+   +-------+
-| step i  |---| arm VIRTUAL timer at t_epoch + i*dt
-| of dt   |   | vm_start
-|         |   | wait icount budget exhaust virtual time
-|         |---| vm_stop @ virtual = i*dt + chunk_remainder
-+---------+   +-------+
-```
-
-- **Mechanism**: QEMU runs with `-icount shift=10,sleep=on`.
-  Each step's deadline is absolute (epoch + i*dt) on
-  `QEMU_CLOCK_VIRTUAL`, not relative. Per-step overshoot from
-  icount chunk boundary is absorbed by the next step's absolute
-  target.
-- **Drift between clocks**: zero cumulative. Per-step error is
-  bounded by `icount_percpu_budget` ≈ 50-100 µs in virtual
-  time. After N steps, guest virtual time is at
-  `t_epoch + N*dt ± chunk`, regardless of how many steps.
-- **Real-time matching**: NOT matched. QEMU runs as fast as
-  TCG manages, plus warps virtual time forward when all vCPUs
-  idle (sleep=on). May be faster OR slower than wall.
-- **Effort to use**: ~1-2 days. Bug A (the VIRTUAL-timer wake
-  bug) was fixed in commit 16f8dc3. What remains: package as
-  `embed_qemu_init_icount` + `embed_qemu_step_locked` API
-  variants that handle absolute deadlines internally.
-  **Blocker**: gr740 SMP under `-icount` still hangs at every
-  shift (Blocker B from docs/13). Currently gr712rc-only.
-- **Fit for**: co-simulation with an external scheduler whose
-  clock is also virtual (SystemC TLM as-fast-as-possible, FMI
-  co-sim, Python test harness with explicit step). Regression
-  tests where bit-exact replay matters (additional work needed
-  on peripherals — see docs/12).
-- **Doesn't fit**: real-time HIL with physical hardware where
-  the wall clock IS the requirement.
-
-### Model C — Model B + external wall-clock rate limiter
-
-```
-external                 QEMU
-+----------------+       +-------+
-| step i of dt   |-------| advance VIRTUAL i*dt (Model B)
-| if wall < dt:  |       |
-|   sleep        |       |
-+----------------+       +-------+
-```
-
-- **Mechanism**: Model B internally, plus the external
-  scheduler sleeps to consume any wall-clock slack. If the
-  step's wall completion was 700 µs and `dt = 1 ms`, sleep
-  300 µs externally before the next step. If wall was 1.2 ms
-  (over budget), don't sleep (best-effort match).
-- **Drift between clocks**: zero in virtual; bounded in wall by
-  the worst-case per-step wall time (≈ TCG cost + 200 µs floor).
-- **Real-time matching**: matched on average if `dt` is larger
-  than the worst-case wall per step (typically `dt ≥ 5 ms`
-  works comfortably; `dt = 1 ms` works with bounded jitter).
-- **Effort to use**: Model B's work plus a rate-limiter loop in
-  the external scheduler. Trivial on the SDK side.
-- **Fit for**: real-time HIL with strict timing AND
-  scheduler-to-scheduler sync. The "best of both" position.
-- **Doesn't fit**: `dt < 1 ms`. The wall-clock floor of the
-  step itself can exceed sub-millisecond budgets, so the
-  sleep-to-match approach loses meaning.
-
-### Model D — Continuous-run with virtual-time sync points
+The escape hatch from the per-step floor is to **stop stepping
+per dt entirely**. Run QEMU continuously under REALTIME after a
+single `vm_start`, and sample state via host-side MMIO from
+peripherals registered through the SDK in
+`docs/12-host-side-peripherals.md`. Each MMIO transaction costs
+~10 µs (single BQL acquire) — an order of magnitude lower than
+pause/resume.
 
 ```
 external                 QEMU
 +-------------+          +-------+
 | start QEMU  |--------->| vm_start (one shot)
-|             |          | runs continuously under REALTIME
-| host loop:  |          |
+|             |          |
+| host loop:  |          | runs continuously under REALTIME
 |   sleep dt  |          |
-|   read state|<-MMIO----| host MMIO read takes BQL,
-|             |          |   synchronously serialised with vCPUs
+|   read MMIO |<-MMIO----| ~10 µs per transaction
 |   write evt |--MMIO--->|
 +-------------+          +-------+
 ```
 
-- **Mechanism**: QEMU runs continuously under REALTIME pacing
-  after a single `vm_start`. No per-step pause. The host
-  observes / drives state via the host-side peripheral SDK
-  (`docs/12-host-side-peripherals.md`). Each MMIO transaction
-  from the host takes the BQL, which naturally synchronises
-  with the vCPU thread for the duration of the transaction.
-- **Drift between clocks**: depends on the sync point cadence.
-  If the host samples at wall-clock `dt` intervals, guest
-  virtual time advances roughly `dt` between samples, with
-  small variance from TCG throughput.
-- **Real-time matching**: by construction wall ≈ guest (it's
-  REALTIME mode internally).
-- **Per-sync-point cost**: ~10 µs (single MMIO transaction +
-  BQL acquire), versus ~150 µs for a full pause/resume cycle.
-  **An order of magnitude lower than Models A/B/C.**
-- **Effort to use**: medium. The mechanism is already in place
-  (host-side peripherals), but the SDK doesn't yet package it
-  as a "step-equivalent" API. The host has to design its loop
-  around MMIO reads, not `embed_qemu_step` calls.
-- **Fit for**: high-rate sampling (sub-millisecond effective
-  rate is achievable), HIL where the host doesn't need
-  stop-the-world atomic state snapshots.
-- **Doesn't fit**: workflows that require the guest to be
-  paused while the host inspects multiple state items
-  atomically. Continuous-run gives a "rolling view" of the
-  guest, not a frozen snapshot.
+**Tradeoff**: the guest does not freeze between transactions —
+the host gets a rolling view of state, not an atomic snapshot.
+Adequate for sampling-style HIL; inadequate for workflows that
+need "all registers at instant T."
 
-### Model E — Process separation + IPC (acknowledged, not recommended)
+**Status**: substrate shipped (host-side peripheral SDK,
+`embed_register_peripheral` + `embed_mmio_read/write`); a
+documented loop pattern and worked example are not. Building
+both is ~3–5 days when a concrete consumer appears with a
+sub-ms sampling requirement.
 
-QEMU as a separate process with the external scheduler driving
-it via IPC (Unix socket, shared memory). Adds a process
-boundary and IPC marshalling cost on top of everything Model
-A/B does. The SDK explicitly exists to avoid this. Listed for
-completeness — only relevant if libqemu turns out to be
-fundamentally unfit for some unforeseen reason.
+## Closing principle
 
-## Recommendation matrix
-
-| External scheduler shape                            | Timing requirement   | Recommended model | Effort beyond current SDK |
-| ---                                                 | ---                  | ---               | ---                       |
-| Wall-clock-driven, ±10 % timing OK                  | Real-time            | **A** (current)   | Zero                      |
-| Wall-clock-driven, strict timing                    | Hard real-time, dt ≥ 5 ms | **A** + external rate limiter | Trivial (rate-limiter loop in host) |
-| Virtual-time, as-fast-as-possible                   | Lockstep, no drift   | **B** — *not viable for SMP guests* (see below); **A** if SMP acceptable | High — would require upstream QEMU fix for icount+rr+SMP |
-| Virtual-time, sub-ms sampling                       | Lockstep, sub-ms     | **D**             | 3-5 d (loop pattern + examples) |
-| Mixed / unclear                                     | Mixed                | Start at **A**, escalate when a use case forces it | — |
-
-## What is and isn't shipped today
-
-| Building block                                       | Status                                  |
-| ---                                                  | ---                                     |
-| REALTIME `embed_qemu_step(dt)` (Model A)             | Shipped, current default                |
-| `qemu_notify_event` exported for cross-thread wake   | Shipped (1d32a74, 16f8dc3)              |
-| Flag-based step deadline callback                    | Shipped (16f8dc3)                       |
-| icount mode opt-in API (Models B/C)                  | **Tried, reverted** (May 2026) — see "Models B and C — tried and abandoned" below |
-| Absolute virtual deadlines in step API               | **Tried, reverted** — code preserved in git history at `b8899a4` |
-| gr740 SMP under `-icount` (Blocker B)                | **Diagnosed, structural** — PIL-spin starvation under rr+icount, no viable fix at this layer |
-| Host-side peripheral SDK (Model D substrate)         | Shipped (`docs/12-host-side-peripherals.md`) |
-| Documented "sampling loop" host pattern (Model D)    | **Not shipped** — would need example + doc |
-| Determinism via virtual-time-paced peripherals       | **Not shipped** — design pass required, depends on Model B |
-
-## What this evaluation deliberately does NOT prescribe
-
-- **A single recommended model.** Each model trades different
-  axes (real-time accuracy vs. determinism vs. per-step
-  cost). The right pick depends on what the external
-  scheduler is, and that is a deployment decision.
-- **A schedule.** The "effort beyond current SDK" column gives
-  order-of-magnitude estimates assuming the use case is clear.
-  None of these is shipped today; the order in which they get
-  built should follow concrete user demand, not speculation.
-- **A claim of "this is fast enough".** ~150 µs per step is the
-  wall-clock floor for Models A/B/C; whether that's tolerable
-  is a property of the external scheduler's requirements, not
-  of the SDK.
-
-## Models B and C — tried and abandoned (May 2026)
-
-The plan one might infer from the model catalogue above —
-*ship Model B's plumbing, then investigate Blocker B for SMP
-parity* — was attempted in a single investigation session and
-reverted in the same session. The catalogue is left intact as
-**design reference**, but the SDK currently ships **only Model
-A**. Reintroducing Model B is not blocked by missing code; it
-is blocked by a structural interaction between `-icount`,
-round-robin TCG, and RTEMS SMP critical sections that none of
-the experiments could route around.
-
-**What was shipped, then reverted:**
-
-- Commit `b8899a4` — `embed_qemu_init_icount` +
-  `embed_qemu_step_locked` API, two lockstep examples
-  (gr712rc, gr740), and a Model B section in docs/11. Reverted
-  by `3041aee`.
-- Commit `b8e8008` — diagnosis of Blocker B with empirical
-  data: 228,997 software traps and 0 external interrupts in
-  3 seconds wall on gr740 SMP under `-icount auto,sleep=on`.
-  Reverted by `4cfec03`.
-
-Both commits remain in git history; `git show b8899a4` and
-`git show b8e8008` recover the full implementation and
-diagnosis if reintroducing the work is ever justified.
-
-**Why it was abandoned**: this project's primary apps are SMP
-RTEMS (`apps/02-dual-core-timer`, `apps/08-gr740-smp`). Under
-`-icount` + rr-mode TCG, the RTEMS SMP ticket-lock pattern
-(`_SMP_lock_ISR_disable_and_acquire`, paired `ta 0x9` /
-`ta 0xA` traps) keeps `PSR.PIL=15` for >99% of execution.
-External IRQs (timer ticks, IPIs) are masked during that
-window; the brief PIL-low windows between `rett` and the next
-`ta 0x9` are too short for the rr scheduler to land an IRQ
-before the next critical section starts. Result: gr740 SMP
-hangs (0 IRQs delivered in 3 s), gr712rc SMP runs ~10× slower
-than Model A (≈10 lines of UART vs ≈100+ in the same wall
-budget). Both empirical, both reproducible. Without an
-external scheduler that can work with single-core guests only
-— and the project has none today — Model B has near-zero
-value here.
-
-**Refuted hypotheses** (kept here as breadcrumbs so future
-readers do not re-investigate the same dead ends):
-
-| Suspected cause                                  | Verdict |
-| ---                                              | --- |
-| 4 vCPUs saturate `icount_percpu_budget`          | Refuted — `-smp 2` also hangs |
-| `qemu_cpu_kick` fails under rr-mode              | Refuted — `info cpus` confirms all CPUs running |
-| `ldstub` / `casa` atomicity broken under rr      | Refuted — `gen_ldstub_asi` uses `tcg_gen_atomic_xchg_tl` |
-| IPI delivery is broken                            | Refuted (and broader) — no external IRQ of any kind fires |
-| Higher icount shift would unblock                | Refuted — full 0–10 sweep + `align=on` + `sleep=off` all hang |
-
-**Re-attempting** Model B is only justified if one of these
-two changes:
-
-1. A concrete consumer needs lockstep co-simulation AND can
-   use single-core guests exclusively. Then re-cherry-pick
-   `b8899a4` minus the SMP examples.
-2. An upstream QEMU change addresses the rr+icount+PIL-spin
-   interaction. Then re-attempt with the upstream fix and
-   re-test the SMP apps as the acceptance criterion.
-
-## Closing
-
-The two-scheduler architecture is workable. Per-step coupling
-overhead (~120-220 µs) is a budget item, not a defect — it
-limits the smallest viable `dt` to roughly ms-scale for Models
-A/B/C, and pushes higher-rate workflows toward Model D
-(continuous-run with sampling). Sync correctness between the
-two schedulers, in contrast, is a solved problem under Model B
-once packaged.
-
-The next concrete step is to wait for a real consumer use case
-and pick the model accordingly. The SDK's current default
-(Model A) covers the broadest swath of HIL workflows; the
-upgrade paths (B, C, D) are scoped, the technical risk has been
-characterised, and the work is bounded.
+Pick the coupling model when a real consumer use case forces the
+choice. Speculative shipping of Models B/C/D leaves the SDK with
+APIs nobody uses, drift between docs and reality, and confusion
+about which path is "supported." The current default (Model A,
+5 ms) covers the broadest swath of HIL workflows; the upgrade
+paths are scoped above, the technical risk is characterised, and
+the work is bounded.
