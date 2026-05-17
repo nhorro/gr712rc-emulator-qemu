@@ -51,8 +51,8 @@ the [`qemu/`](https://github.com/nhorro/qemu-gr712rc-fork) submodule.
 - [Embedding as library](11-embedding-as-library.md) — running the
   emulator inside another program by linking `libqemu-sparc.so` and
   driving QEMU step-by-step from the host's own `main()`. Covers the SDK
-  header `libqemu.h`, the example wrapper, the granularity sweep that
-  froze the operating point at 1 ms REALTIME, and the bundled timing
+  header `libqemu.h`, the example wrapper, the multi-core dt-sweep that
+  froze the operating point at 5 ms REALTIME, and the bundled timing
   examples.
 - [Host-side peripherals via the SDK](12-host-side-peripherals.md) —
   registering MMIO peripherals from your own host code without touching
@@ -60,6 +60,11 @@ the [`qemu/`](https://github.com/nhorro/qemu-gr712rc-fork) submodule.
   `embed_mmio_write/read` for host-injected bus traffic, `embed_irq_*`
   to raise IRQs from callbacks or worker threads, and the
   `peripheral-test` 9-assertion harness covering both machines.
+- [Co-simulation scheduling — design FAQ](14-co-simulation-scheduling.md) —
+  the two shipped coupling models (Model A discrete stepping at
+  dt = 5 ms, Model D continuous-run with sub-µs MMIO sampling), why
+  lockstep / `-icount` (Model B) was rejected, and when to pick which.
+  Worked Model D example at `embed/examples/sampling/`.
 
 ### Hardware reference
 

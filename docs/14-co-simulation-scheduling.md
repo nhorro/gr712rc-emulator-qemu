@@ -4,13 +4,20 @@
 shipped?" without requiring readers to re-derive abandoned
 investigations.
 
-The SDK ships exactly one coupling model between an external
-scheduler and QEMU: **Model A — REALTIME pacing at dt = 5 ms**.
-The operating point and its empirical justification live in
-`docs/11-embedding-as-library.md § Operating point and timing`.
-This document records what else was considered, why it was
-rejected, and what would be required if a future consumer
-forces the question.
+The SDK ships two coupling models:
+
+- **Model A — REALTIME pacing at dt = 5 ms** (default). The host
+  steps QEMU forward in discrete dt slices via
+  `embed_qemu_step`. Operating point and empirical justification
+  in `docs/11-embedding-as-library.md § Operating point and timing`.
+- **Model D — continuous-run with MMIO sampling**. QEMU runs
+  continuously after one `vm_start`; the host samples state via
+  `embed_mmio_read` from a host-registered peripheral. Worked
+  example at `embed/examples/sampling/`.
+
+This document records both, plus what was considered and
+rejected (Models B and C), to spare future readers from
+re-deriving abandoned investigations.
 
 ## Why not lockstep / deterministic stepping (Model B, `-icount`)
 
@@ -59,15 +66,15 @@ Consequence: any `dt` below ~1 ms makes the floor dominate
 `docs/11`). The recommended 5 ms point sits comfortably above
 the floor.
 
-## What Model D would be (if sub-ms sampling is ever required)
+## Model D — continuous-run with MMIO sampling (shipped)
 
 The escape hatch from the per-step floor is to **stop stepping
 per dt entirely**. Run QEMU continuously under REALTIME after a
 single `vm_start`, and sample state via host-side MMIO from
 peripherals registered through the SDK in
 `docs/12-host-side-peripherals.md`. Each MMIO transaction costs
-~10 µs (single BQL acquire) — an order of magnitude lower than
-pause/resume.
+sub-microsecond when the iothread already holds the BQL — two
+orders of magnitude lower than pause/resume.
 
 ```
 external                 QEMU
@@ -76,28 +83,60 @@ external                 QEMU
 |             |          |
 | host loop:  |          | runs continuously under REALTIME
 |   sleep dt  |          |
-|   read MMIO |<-MMIO----| ~10 µs per transaction
+|   read MMIO |<-MMIO----| <1 µs p50, ~5 µs p99 per transaction
 |   write evt |--MMIO--->|
 +-------------+          +-------+
 ```
+
+**Loop pattern**: a QEMUTimer on REALTIME fires every sample
+period and flips a flag. `main_loop_wait(false)` drops the BQL
+during ppoll so guest vCPUs can take it for IRQ delivery and
+MMIO; when the timer fires the callback flag is checked, a
+sample is taken via `embed_mmio_read`, and the timer is rearmed.
+The worked example is `embed/examples/sampling/main.c`.
+
+**Empirical**: 5-second runs at 200 µs sample period (5 kHz
+nominal) sustain ~4.4 kHz actual rate:
+
+| Machine          | Wall vs virt | Per-sample p50 | p99      | vs Model A floor |
+| ---              | ---          | ---            | ---      | ---              |
+| gr712rc SMP (2c) | slip 0.00%   | 755 ns         | 4.9 µs   | ~160× cheaper    |
+| gr740 SMP (4c)   | slip 0.00%   | 774 ns         | 3.9 µs   | ~280× cheaper    |
+
+Both machines achieve zero slip because QEMU runs continuously
+under REALTIME — observing does not perturb the observed.
+gr740 SMP does not pay the per-vCPU coordination cost that
+penalises it under Model A: Model D never pauses any vCPU.
 
 **Tradeoff**: the guest does not freeze between transactions —
 the host gets a rolling view of state, not an atomic snapshot.
 Adequate for sampling-style HIL; inadequate for workflows that
 need "all registers at instant T."
 
-**Status**: substrate shipped (host-side peripheral SDK,
-`embed_register_peripheral` + `embed_mmio_read/write`); a
-documented loop pattern and worked example are not. Building
-both is ~3–5 days when a concrete consumer appears with a
-sub-ms sampling requirement.
+**When to use Model D over Model A**:
+
+- need sample rate above ~200 Hz (Model A's natural ceiling at
+  dt = 5 ms);
+- host is essentially an observer plus occasional writer (read
+  sensors via MMIO, occasionally inject events);
+- atomic snapshot of guest state across multiple registers is
+  not required.
+
+**When NOT to use Model D**:
+
+- guest must be frozen between operations (debugger, atomic
+  multi-register inspection) — use Model A's `embed_qemu_step`;
+- lockstep / deterministic replay needed — Model B was
+  abandoned, no current path;
+- workload is already discrete-time at ms scale (a physics
+  solver running at 200 Hz) — Model A is the natural fit.
 
 ## Closing principle
 
-Pick the coupling model when a real consumer use case forces the
-choice. Speculative shipping of Models B/C/D leaves the SDK with
-APIs nobody uses, drift between docs and reality, and confusion
-about which path is "supported." The current default (Model A,
-5 ms) covers the broadest swath of HIL workflows; the upgrade
-paths are scoped above, the technical risk is characterised, and
-the work is bounded.
+Models A and D cover the practical envelope (discrete-time
+stepping at ms scale, and continuous-run sampling at sub-ms).
+Model B (lockstep / determinism) stays unshipped because no
+viable path exists for SMP RTEMS — re-attempt only if upstream
+QEMU addresses the rr+icount+PIL-spin interaction. Adding
+anything beyond Models A and D should wait for a concrete
+consumer use case that exposes a gap neither covers.
