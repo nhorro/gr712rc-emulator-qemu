@@ -366,8 +366,16 @@ class QEMUSession:
         except OSError:
             pass  # fall back to -kernel; QEMU will surface a clear error
 
+        # The default backend is the standalone QEMU binary. Override with
+        # QEMU_BINARY=qemu-system-sparc-embed (or an absolute path) to swap
+        # in the embedding-SDK wrapper at
+        # embed/examples/qemu-service/. Same argv shape -- only the
+        # implementation differs (subprocess linking libqemu-sparc.so
+        # instead of the standalone qemu-system-sparc).
+        qemu_bin = os.environ.get("QEMU_BINARY", "qemu-system-sparc")
+
         cmd = [
-            "qemu-system-sparc",
+            qemu_bin,
             "-M", self.machine,
             "-smp", str(self.smp),
             "-m", f"{self.ram_mb}M",

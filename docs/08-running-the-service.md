@@ -202,3 +202,65 @@ docker run -d -p 8080:8080 --tmpfs /var/uploads:size=64m \
 Once exposed across a network, add an authentication layer (reverse
 proxy with HTTP basic auth, or a service-side API key — currently out
 of scope per the v0 spec).
+
+## Switching the emulator backend (standalone ↔ embedded SDK)
+
+The image ships **two** emulator binaries side-by-side:
+
+| Binary | What it is |
+| --- | --- |
+| `qemu-system-sparc` | The upstream `-style standalone QEMU as patched by this fork. The default. |
+| `qemu-system-sparc-embed` | A C wrapper that links `libqemu-sparc.so` and runs QEMU as an in-process library. Same argv, same QMP, same UART/SpW sockets. Added because the SDK route (see [docs/12](12-host-side-peripherals.md)) needs to be demonstrably equivalent to the standalone path. |
+
+Both speak the same control protocol, so the FastAPI service is
+agnostic. Pick one with the `QEMU_BINARY` environment variable on
+`docker compose up`:
+
+```bash
+# Standalone (default — no env var needed).
+docker compose up --build
+
+# Embedded backend.
+QEMU_BINARY=qemu-system-sparc-embed docker compose up --build
+```
+
+A self-contained end-to-end smoke for the embedded path lives at
+[`embed/examples/qemu-service/run-embed-demo.sh`](../embed/examples/qemu-service/run-embed-demo.sh):
+
+```bash
+./embed/examples/qemu-service/run-embed-demo.sh
+# Builds the gr712rc + gr740 kernels, brings up compose, runs both
+# machines through the full upload/start/read flow, verifies the
+# host-info magic, tears down on exit. Pass KEEP_UP=1 to leave the
+# stack running so you can poke the UI in a browser afterwards.
+```
+
+The embedded backend adds a tiny read-only **host-info peripheral**
+that the standalone cannot replicate. Visible at:
+
+| Machine | Address | What you'll read at +0..+3 |
+| --- | --- | --- |
+| `-M gr712rc` | `0x80000a00` | magic `"LIBO"` (`0x4c49424f`) |
+| `-M gr740`   | `0xff900a00` | magic `"LIBO"` (`0x4c49424f`) |
+
+Plus host PID at `+0x04`, wall-clock uptime in seconds at `+0x08`,
+and a machine-id code at `+0x0c` (`0x67723730` for gr712rc,
+`0x67723731` for gr740). Read it through the API:
+
+```bash
+$ curl -s "http://localhost:8080/session/memory?addr=0x80000a00&size=16" | jq .
+{
+  "addr": "0x80000a00",
+  "size": 16,
+  "data": "4c49424f 0000000c 00000002 67723730"
+}
+```
+
+That magic word in the response is the proof the simulation is
+running inside the FastAPI container's process rather than in a
+spawned `qemu-system-sparc` subprocess — there is no real silicon
+peripheral at that address; only the embed wrapper can serve it.
+
+The bundled UI's **Memory** pane will show the same readback when you
+point it at the host-info address; nothing in the UI itself changes
+to support this backend.

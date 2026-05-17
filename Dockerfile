@@ -39,6 +39,11 @@ COPY qemu/ ./qemu/
 # Configure for SPARC soft-MMU only. --disable-werror tolerates harmless
 # warnings from the bundled fork. --prefix is where `ninja install` puts
 # the binary, pc-bios files, etc., so stage 2 can copy a single tree.
+#
+# b_staticpic=true makes the bundled static libs PIC so they can be
+# linked into libqemu-sparc.so (the embedding-SDK shared library used by
+# the qemu-system-sparc-embed wrapper below). Without this flag meson
+# refuses to build a shared library out of these objects.
 RUN cd qemu && \
     mkdir -p build && cd build && \
     ../configure \
@@ -50,10 +55,27 @@ RUN cd qemu && \
         --disable-sdl \
         --disable-vnc \
         --disable-curses \
-        --disable-tools && \
-    ninja -j"$(nproc)" && \
+        --disable-tools \
+        -Db_staticpic=true && \
+    ninja -j"$(nproc)" libqemu-sparc.so && \
     ninja install && \
-    strip /qemu-install/bin/qemu-system-sparc
+    strip /qemu-install/bin/qemu-system-sparc && \
+    install -D -m 0755 libqemu-sparc.so /qemu-install/lib/libqemu-sparc.so
+
+# Build the embedding wrapper qemu-system-sparc-embed. This is the
+# drop-in replacement for qemu-system-sparc that the FastAPI service
+# uses when QEMU_BINARY=qemu-system-sparc-embed. Same argv shape,
+# different implementation (host process linking libqemu-sparc.so).
+COPY embed/ /src/embed/
+COPY apps/  /src/apps/
+RUN gcc -Wall -Wextra -O2 \
+        -I/src/embed -I/src/qemu/include \
+        /src/embed/examples/qemu-service/main.c \
+        /src/embed/embed_qemu.c \
+        -L/src/qemu/build -lqemu-sparc \
+        -Wl,-rpath,/usr/local/lib \
+        -o /qemu-install/bin/qemu-system-sparc-embed && \
+    strip /qemu-install/bin/qemu-system-sparc-embed
 
 #######################################################################
 # Stage 2: runtime image
@@ -69,8 +91,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libyaml-0-2 \
     && rm -rf /var/lib/apt/lists/*
 
-# QEMU binary + pc-bios + share files from the builder.
+# QEMU binary + pc-bios + share files + libqemu-sparc.so + the
+# qemu-system-sparc-embed wrapper from the builder. ldconfig picks up
+# /usr/local/lib so the dynamic loader finds libqemu-sparc.so without
+# LD_LIBRARY_PATH.
 COPY --from=qemu-builder /qemu-install /usr/local
+RUN ldconfig
 
 # Adapter service. Installed editable so a bind-mount of service/ during
 # development picks up code changes without an image rebuild.

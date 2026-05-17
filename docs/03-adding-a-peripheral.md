@@ -9,6 +9,16 @@ The approach mirrors what you would do in a TEMU plugin: define a register set,
 provide read/write callbacks, and optionally schedule timer events or raise IRQs.
 The additional step in QEMU is fitting the device into the QOM type system.
 
+> **Alternative — register the peripheral from outside QEMU.** If you are
+> already embedding `libqemu-sparc.so` in your own program, you can declare
+> a peripheral at runtime via `embed_register_peripheral()` without writing
+> a QOM device or rebuilding QEMU. See
+> [Host-side peripherals via the SDK](12-host-side-peripherals.md) for the
+> tradeoffs and the SDK reference. The native path documented below is
+> still the right choice for peripherals that should be discoverable by
+> `qemu-system-sparc` standalone, persist across `savevm`/`loadvm`, or
+> eventually go upstream.
+
 ---
 
 ## Overview of steps
